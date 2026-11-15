@@ -130,18 +130,22 @@
     "T_G_solo_s_per_block": 0.1618,
     "T_G_solo_gops": 877.0,
     "T_G_co_run_s_per_block": null,
-    "T_N_s_per_block": null,
+    "T_N_s_per_block": 0.6758,
     "T_V_s_per_chunk": null,
-    "status": "T_G solo measured (0.1618 s/block, Mali 64x64x32 tile 8x4); T_N = TBD (blocked: 9 of 10 block GEMMs measured on the TPU, but ffn.down (K=8960) has no compilable graph - DEAD_OBJECT after ~62 s - and both timed runs started hot); T_V, co-run T_G = TBD",
+    "status": "T_G solo measured (0.1618 s/block, Mali 64x64x32 tile 8x4). T_N = 0.6758 s/block MEASURED AS A SUM, not a co-run: 9/10 GEMMs from the gate-compliant cool capture (0.4178 s, npu_tn_20261115_160146) + ffn.down on the TPU as 7x FC[1536,1280] + 6x ADD (0.2580 s/block, npu_tn_20261115_174838). Still TBD: T_V, co-run T_G, per-tensor-scale parity.",
     "note": "must be measured with both engines co-running, at the target resolution and thermal state; report the solo number as a kernel rate only",
-    "T_N_partial_9of10_s_per_block": 0.4112,
-    "T_N_partial_note": "measured sum of 9/10 GEMMs at M=384 x 4 token tiles = 70.3% of block MACs, HOT-STARTED (TPU 60-67 C, gate wanted <= 30.3 C) -> lower bound only, not table-grade; see docs/device/RESULTS_npu_tn.md",
-    "T_N_over_T_G_lower_bound": 2.54
+    "T_N_partial_9of10_s_per_block": 0.4178,
+    "T_N_partial_note": "sum of 9/10 GEMMs at M=384 x 4 token tiles = 70.3% of block MACs, GATE-COMPLIANT cool start (TPU 29.0 C vs 29.1 C gate); superseded by T_N_s_per_block once ffn.down was measured",
+    "T_N_ffn_down_tpu_s_per_block": 0.258,
+    "T_N_ffn_down_mali_s_per_block": 0.04733,
+    "T_N_ffn_down_tpu_over_mali": 5.45,
+    "T_N_over_T_G_lower_bound": 2.58,
+    "T_N_over_T_G_measured_sum": 4.18
   },
   "cut": {
     "formula": "period(k_b) = max(k_b*T_G, (B-k_b)*T_N + T_V); k* = (B*T_N + T_V)/(T_N + T_G)",
     "k_b": null,
-    "status": "TBD (blocked on T_N, T_V and the co-run T_G)"
+    "status": "TBD (blocked on T_V and the co-run T_G; T_N is now a measured sum at 0.6758 s/block, but the locked rule still requires a co-run stage rate before k_b* is solved)"
   },
   "gates": {
     "gate_1_artifact": {
@@ -218,9 +222,11 @@
   "npu_constraints": {
     "graph_token_ceiling": 384,
     "tiles_at_preset_a": 4,
+    "reduction_dim_ceiling": 1664,
+    "reduction_dim_note": "one FULLY_CONNECTED [N=1536,K] compiles at K=1280/1536/1600/1664 (0.34-0.52 s) and fails OP_FAILED from K=1792 up (46-59 s; K=8960 also gave DEAD_OBJECT after 62 s). ffn.up - the same 13.7 MB of weights at K=1536 - compiles in 1.44 s, so the ceiling is the reduction dim, not N or weight bytes. The support query reports every one of those shapes 'supported', so it is not a viability test. Chunk to <=1664, one compilation per op (ffn.down = 7x FC[1536,1280] + 6x ADD, 2.57 s total); chunking inside a single graph does NOT work (down2 = 2x K=4480 + ADD, all ops supported, compile OP_FAILED at 47.8 s).",
     "graph_shape": "one graph per (block, token-tile); whole-block graphs validated and were SUPPORTED by google-edgetpu but Compilation_finish REBOOTED THE DEVICE (2026-11-15) -> one graph per GEMM is the only viable path",
     "weight_scales": "per-tensor only: TENSOR_QUANT8_SYMM_PER_CHANNEL is rejected by FULLY_CONNECTED with addOperation BAD_DATA(4), so the per-output-column scheme cannot be expressed on the NPU stage; decision pending (see docs/device/RESULTS_npu_tn.md section 2)",
-    "uncompilable_shape": "FC with K=8960 (ffn.down) -> DEAD_OBJECT after ~62 s compile, reproduced in a fresh process; chunked-K + ADD or Mali is the untested workaround",
+    "uncompilable_shape": "FC with K=8960 (ffn.down) -> OP_FAILED at 47.2 s / DEAD_OBJECT at 62.0 s, reproduced in fresh processes; it is the K>1664 ceiling, not this shape (see reduction_dim_ceiling). Both workarounds are now MEASURED: chunked 7x FC[1536,1280] + 6x ADD on the TPU = 0.2580 s/block (163.9 GOPS); Mali tiled = 0.04733 s/block (893 GOPS) -> the TPU is 5.45x slower for this GEMM. Engineering recommendation: ffn.down on Mali whichever way the cut lands; the decision is the student's",
     "measured_per_gemm_ms_per_tile_at_M384": {
       "attn_1536x1536": 8.02,
       "ffn_up_1536x8960": 36.74
@@ -276,7 +282,7 @@
       "computed_int8_factors": 41.0,
       "naive_rankR_loop": 472.9
     },
-    "implication": "GPU ~3.3x FASTER per block than the TPU bound -> the paper's premise inverts on Tensor G1; T_G << T_N and k_b* lands late. Roles are not swapped (nothing refuses delegation); the closed-form cut is simply solved with the measured rates.",
+    "implication": "GPU 4.18x FASTER per block than the measured T_N sum (0.6758 vs 0.1618 s/block) -> the paper's premise inverts on Tensor G1; T_G << T_N and k_b* lands late. Roles are not swapped (nothing refuses delegation); the closed-form cut is simply solved with the measured rates.",
     "caveat": "solo kernel rate. Stage rates must be co-run measured (locked rule) - T_G co-run, T_N token-tiled graph, T_V all still TBD."
   }
 }
