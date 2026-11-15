@@ -123,7 +123,7 @@
       "role": "suffix blocks [k_b, 180) + VAE decode"
     },
     "second_engine_fallback": "locked: always ship the measured closed-form k_b* >= 1, even when small ([5,25]) and the gain is 1.05-1.15x; if NNAPI refuses Edge-TPU delegation (T_N >> T_G), invert roles - faster engine takes the prefix, slower takes suffix+VAE, same period equation",
-    "zero_copy_route": "undecided: A (AHardwareBuffer + SCM_RIGHTS) -> B (file-backed MAP_SHARED mmap) -> C (private copies, Gate-2 failure)",
+    "zero_copy_route": "B (file-backed MAP_SHARED mmap) validated end-to-end; route A (AHardwareBuffer) also works",
     "decision_source": "docs/device/probe_<ts>.json (Gate 0)"
   },
   "rates": {
@@ -144,8 +144,8 @@
       "targets": "int8 bytes = 1.296 GiB +/- 1 MiB; PSNR >= 28 dB, SSIM >= 0.92 vs FP32 (host simulation)"
     },
     "gate_2_zero_copy": {
-      "status": "pending",
-      "targets": "same DMA-BUF inode / file mapped by both runtimes; no second base-weight copy"
+      "status": "pass",
+      "evidence": "docs/device/RESULTS_gate0.md (ZEROCOPY_VERIFY -> SHARED on AHB and file-mmap routes)"
     },
     "gate_3_thermal": {
       "status": "pending",
@@ -161,5 +161,58 @@
     }
   },
   "repo": "https://github.com/harris11ax/HeteroVDiff_Pixel_6a (public)",
-  "decisions_locked_2026_11_15": true
+  "decisions_locked_2026_11_15": true,
+  "gate0_measured": {
+    "date": "2026-11-15",
+    "device": "Pixel 6a (bluejay), gs101 Tensor G1, Android 17 / SDK 37, MemTotal 5.72 GB",
+    "opencl": {
+      "name": "Mali-G78 r0p0",
+      "cus": 20,
+      "version": "OpenCL 3.0 r54p2",
+      "max_mem_alloc_mib": 4095.5,
+      "global_mem_mib": 5589.3,
+      "arm_dot_int8": true,
+      "arm_dot_accumulate_int8": true,
+      "arm_import_memory": true,
+      "naive_gemm_gops": 10.4
+    },
+    "ahb_max_blob_mib": 1792,
+    "npu": {
+      "devices": [
+        "google-edgetpu (ACCELERATOR)",
+        "nnapi-reference (CPU)"
+      ],
+      "fc_k1536_n8960_ms": {
+        "128": 10.723,
+        "256": 24.804,
+        "384": 37.434
+      },
+      "graph_token_ceiling": 384,
+      "ceiling_note": "M=448 -> OP_FAILED; M>=512 -> DEAD_OBJECT (HAL stops answering)",
+      "effective_gops": 285
+    },
+    "zero_copy": {
+      "route_a_ahb": "PASS (GPU write visible to host)",
+      "route_b_file_mmap": "PASS",
+      "preferred": "B"
+    },
+    "thermal": {
+      "source": "dumpsys thermalservice",
+      "zones": [
+        "TPU",
+        "skin_therm1",
+        "skin_therm2",
+        "battery",
+        "VIRTUAL-SKIN"
+      ],
+      "tpu_idle_c": 31.0,
+      "tpu_after_fc_sweep_c": 53.0
+    },
+    "implication": "T_N ~ 0.53 s/block at Preset A if TPU-only; T_G unknown until a tiled Mali GEMM exists (naive is 31.6x slower than the TPU on the same GEMM)"
+  },
+  "npu_constraints": {
+    "graph_token_ceiling": 384,
+    "tiles_at_preset_a": 4,
+    "graph_shape": "one graph per (block, token-tile) candidate; whole-block graphs untested"
+  }
 }

@@ -49,50 +49,122 @@ buffer. The paper's per-block split was forced by a 511 MiB limit — **that con
 exist here**, so per-block regions are a *design choice* (finer handoff/remap granularity, and they
 keep each engine's mapped footprint small), not a necessity. Say that explicitly in the report.
 
-## Zero-copy routes
+## Zero-copy routes — see the measured section below
 
-| route | result |
-|---|---|
-| `AHardwareBuffer` → `ANeuralNetworksMemory_createFromAHardwareBuffer` | **rc=0 (NO_ERROR)** |
-| file (`MAP_SHARED`) → `ANeuralNetworksMemory_createFromFd` | **rc=0 (NO_ERROR)** |
-| `AHardwareBuffer` → `clImportMemoryARM` | resolves; first attempt `err=-64` = `CL_INVALID_PROPERTY` because the properties list was not zero-terminated — **fixed, re-test pending** |
-| file mmap → `clImportMemoryARM` (`CL_IMPORT_TYPE_HOST_ARM`) | same, pending |
+Both backings are accepted by NNAPI (`createFromAHardwareBuffer` and `createFromFd` return 0) and both
+import into OpenCL. The full verification (GPU write visible through the host pointer) is in
+**"Zero-copy — Gate 2 passes on both routes"** below.
 
-**How to get `clImportMemoryARM`**: `dlsym(handle_of_libOpenCL.so, "clImportMemoryARM")` returns
-NULL — Android's CL ICD loader does not forward vendor extension symbols, and
-`/vendor/lib64/libOpenCL-pixel.so` does not export it either. The working path is
-`clGetExtensionFunctionAddressForPlatform(platform, "clImportMemoryARM")` (CL 1.2+): **found**.
-Record this in the report; it is the kind of thing that costs a week if discovered late.
-
-## NNAPI — the Edge TPU *is* reachable
+## NNAPI — the Edge TPU *is* reachable, but it has a hard token ceiling
 
 ```
 NNAPI_DEVICE_COUNT_rc=0 count=2
 NNAPI_DEV[0].NAME=google-edgetpu     TYPE=4 (ACCELERATOR) fl=1.3
 NNAPI_DEV[1].NAME=nnapi-reference    TYPE=2 (CPU)          fl=1.3
 ```
-`google-edgetpu` **reports support for `FULLY_CONNECTED`** (`getSupportedOperationsForDevices` → true)
-and **executes** an INT8 FC (`32 × 1536 × 8960`) — wall **5.1–5.9 ms**, i.e. ~150 GOPS effective on
-that shape, vs 10.4 GOPS for the naive Mali kernel and ~4 ms…s for the CPU reference path.
-For scale: the same FC on `nnapi-reference` takes **219 ms** (M=32) and **4.99 s** (M=1530).
+`google-edgetpu` **reports support** for `FULLY_CONNECTED` (`getSupportedOperationsForDevices` → true)
+and **executes** INT8 FCs from an `AHardwareBuffer`-backed weight operand.
 
-### Getting an NNAPI graph to validate (three traps, all hit)
+### Measured: one INT8 FC, K=1536, N=8960 (the FFN-up GEMM), isolated process per shape
+
+| M (tokens) | compile | wall (3 iters) | effective |
+|---|---|---|---|
+| 32 | OK | 6.25 ms | 141 GOPS (overhead-dominated) |
+| 128 | OK | **10.72 ms** | **329 GOPS** |
+| 256 | OK | **24.80 ms** | **284 GOPS** |
+| 384 | OK | **37.43 ms** | **282 GOPS** |
+| **448** | **OP_FAILED** | — | ceiling hit |
+| 512 … 1530 | **DEAD_OBJECT** | — | HAL dead after the first refusal |
+| N=1536 @ M=1530 (fresh process) | OP_FAILED | — | same token limit, independent of N |
+
+⇒ **the per-graph activation ceiling is ~384 tokens** for a 1536-wide INT8 GEMM (the paper's
+QNN analogue was 2 GiB/graph; here it is ~30× tighter). Consequences:
+
+1. **Preset A (`M = 1530`) needs the token dimension tiled 4× (4 × 384)** on the NPU side. This is a
+   *new* structural constraint the blueprint does not have: the NPU suffix must tile over
+   (block, token-tile), not just over blocks.
+2. **`DEAD_OBJECT` is sticky.** After the first oversized compile the HAL stops answering — subsequent
+   compiles in the same session fail with `DEAD_OBJECT` even at shapes that worked before. Never
+   submit a graph above the measured ceiling; probe sizes in fresh processes, ascending.
+3. Effective Edge TPU throughput ≈ **285 GOPS** (0.285 TOPS) on this shape.
+
+For scale on the same GEMM: `nnapi-reference` (CPU) takes **219 ms** at M=32 and **4.99 s** at M=1530;
+the naive Mali kernel takes **338.7 ms** at M=128 (10.4 GOPS). TPU / naive-Mali = **31.6×**.
+
+### What that predicts (arithmetic only, not yet measured)
+
+Preset A block = `M·params_per_block = 1530 × 49,586,432` = **75.87 GMAC = 151.7 GFLOP**:
+
+| engine rate | per block | 180 blocks (DiT only) |
+|---|---|---|
+| TPU @ 285 GOPS | 532 ms | **95.8 s / chunk** |
+| naive Mali @ 10.4 GOPS | 14.6 s | 2,626 s / chunk |
+| tiled Mali @ ~1 TOPS (hypothetical) | 152 ms | 27.3 s / chunk |
+
+⇒ **the Mali prefix is the whole open question.** At the naive rate it can never be a stage
+(`T_G ≈ 27 × T_N` ⇒ `k_b* ≈ 7`, gain ≈ 1.03×). A properly tiled INT8 GEMM would make the GPU
+*comparable to or faster than* the TPU, which would invert the paper's premise and push `k_b*` late.
+Kernel engineering, not hardware, decides this — measure it before any cut claim.
+
+### Getting an NNAPI graph to validate (four traps, all hit)
 
 1. **`FULLY_CONNECTED` takes exactly 4 inputs** — `{input, weights[N_out,K], bias[N_out], activation}`.
    Bias is mandatory; there is **no** `activationParams` operand (that belongs to other ops).
    Passing 5 operands ⇒ `model_finish` = `BAD_DATA`.
-2. **You must call `addOperation`.** Building operands and `identifyInputsAndOutputs` is not a model;
-   the validator says `NN_RET_CHECK failed (Validation.cpp:854): !subgraph.operations.empty()`.
+2. **You must call `addOperation`.** Operands + `identifyInputsAndOutputs` are not a model; the
+   validator says `NN_RET_CHECK failed (Validation.cpp:854): !subgraph.operations.empty()`.
    **Read `adb logcat` — the NNAPI manager prints the exact failing check**; guessing wastes runs.
 3. **`TENSOR_QUANT8_SYMM` is not accepted by FC.** Signed int8 is
    `ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED` with `zeroPoint = 0`. Per-output-column scales use
-   `ANEURALNETWORKS_TENSOR_QUANT8_SYMM_PER_CHANNEL` (`channelDim = 0`, operand `scale = 0`, scales
-   passed via `setOperandSymmPerChannelQuantParams`) — that is the exact analogue of the paper's
-   per-column INT8 scale vector.
+   `ANEURALNETWORKS_TENSOR_QUANT8_SYMM_PER_CHANNEL` (`channelDim = 0`, operand `scale = 0`, scales via
+   `setOperandSymmPerChannelQuantParams`) — the exact analogue of the paper's per-column scale vector.
+4. **Weights must be a constant operand** via `setOperandValueFromMemory` from an `ANeuralNetworksMemory`
+   (file-backed or AHB-backed both work). Passing weights as a plain model *input* does not validate.
+   Reusing one `ANeuralNetworksExecution` for a second `compute()` returns `BAD_STATE` — create a
+   fresh execution per invocation.
 
-Weights should be a **constant operand** supplied by `ANeuralNetworksModel_setOperandValueFromMemory`
-from an `ANeuralNetworksMemory` (this is also how the shared artifact reaches the NPU): the same
-model with weights as a plain *input* did not validate.
+## Zero-copy — **Gate 2 passes on both routes**
+
+```
+IMPORT_MEMORY_SYM clGetExtensionFunctionAddressForPlatform -> found
+AHB_CL  import_OK
+AHB_CL  ZEROCOPY_VERIFY host[0]=23130(exp 23130) host[1]=23131(exp 23131) -> SHARED
+AHB_NNAPI_MEMORY_rc=0(NO_ERROR)
+MAPSHARED_OK path=/data/local/tmp/hv_shared.bin bytes=33554432
+FILE_CL import_OK
+FILE_CL ZEROCOPY_VERIFY host[0]=23130(exp 23130) host[1]=23131(exp 23131) -> SHARED
+FILE_NNAPI_MEMORY_rc=0(NO_ERROR)
+```
+
+The GPU kernel wrote a pattern into the imported memory and the **host pointer saw it** — same
+physical pages, no copy. Two working routes:
+
+- **Route A**: `AHardwareBuffer` → `clImportMemoryARM(type=ANDROID_HARDWARE_BUFFER_ARM)` for the GPU,
+  `ANeuralNetworksMemory_createFromAHardwareBuffer` for the NPU.
+- **Route B (simpler, now preferred)**: one file, `mmap(MAP_SHARED)` in both processes →
+  `clImportMemoryARM(type=HOST_ARM)` + `ANeuralNetworksMemory_createFromFd`. One page cache, no
+  `AHardwareBuffer`, no `SCM_RIGHTS`, no fd passing. Same "one stored copy" property.
+
+Three API traps worth remembering:
+
+1. `dlsym(libOpenCL.so, "clImportMemoryARM")` returns NULL — Android's CL ICD loader does not forward
+   vendor extension symbols. Use `clGetExtensionFunctionAddressForPlatform(platform, "clImportMemoryARM")`.
+2. `cl_import_properties_arm` is **`intptr_t` (64-bit)**. Passing a 32-bit `unsigned[]` makes the driver
+   read one garbage 64-bit key and answer `CL_INVALID_PROPERTY (-64)`. The list must be
+   `{CL_IMPORT_TYPE_ARM, type, 0}` in `intptr_t`.
+3. `AHardwareBuffer_getNativeHandle` is absent from the NDK header (see below) — but with route B you
+   never need it.
+
+## What this changes in the plan
+
+1. **Zero-copy is solved** (route B preferred). Gate 2 can be closed as *pass* with the above evidence.
+2. **Per-block AHB splitting is optional** (ceiling 1792 MiB ≫ 47.29 MiB). Keep per-block regions for
+   remap granularity, but state that the constraint that forced them in the paper is absent here.
+3. **The NPU graph must be token-tiled to ≤384 tokens** (4 tiles at Preset A). One graph per
+   (block, token-tile), or one per block with the tile loop inside the graph if the compiler allows
+   it — test both, since per-dispatch overhead is ~6 ms.
+4. **Kernel quality decides whether the GPU is a stage at all.** 10.4 GOPS naive vs 285 GOPS TPU is a
+   31.6× gap; a tiled GEMM must close most of it before `k_b*` means anything.
 
 ## Thermal sensing — `/sys/class/thermal` is closed, `dumpsys` is open
 
@@ -103,20 +175,20 @@ Use `dumpsys thermalservice`, which lists named zones and cooling devices:
   `charger_skin_therm`, `quiet_therm`, `disp_therm`, `usb_pwr_therm2`, `gnss_tcxo_therm`,
   `cellular-emergency`
 - cooling devices: **`tpu_cooling`**, `thermal-cpufreq-0/1/2`, **`thermal-gpufreq-0`**, `fcc`, `usbc-port`
-- at probe time: TPU zone 31 °C (45 °C cached), skin ~25 °C, battery 23 °C, Thermal Status 0
+- idle at probe time: TPU 31 °C, skin ~25 °C, battery 23 °C, Thermal Status 0
+- **after the FC sweep: TPU 53 °C, skin_therm2 41.9 °C, charger_skin 45.1 °C** — i.e. the TPU zone
+  is a direct, usable signal that Process B really executed on the accelerator.
 
-⇒ the thermal gate must parse `dumpsys thermalservice` (the `TPU` zone is the one that matters for
-Process B, `thermal-gpufreq-0`/skin for Process A), and `probe_host.py --cooldown` needs updating to
-read it instead of `/sys/class/thermal`.
+⇒ `probe_host.py --cooldown` now parses `dumpsys thermalservice` (`read_zones()`), keyed on
+`TPU / skin_therm1,2 / battery / VIRTUAL-SKIN`.
 
-## What this changes in the plan
+## Open questions this round leaves
 
-1. **Per-block AHB splitting is optional here** (ceiling 1792 MiB ≫ 47.29 MiB). Keep per-block regions
-   for remap granularity, but state that the constraint that forced them in the paper is absent.
-2. **Zero-copy is plausible on both sides** (AHB→NNAPI works; AHB→CL resolves). Re-test after the
-   properties fix before committing to route A; route B (file mmap) also validated on the NNAPI side.
-3. **`T_N` is obtainable** — the Edge TPU compiles and runs DiT-shaped INT8 FCs. Good news; the
-   open question is the *maximum* shape it will compile (M sweep running) and how it behaves when
-   several FCs are chained into a block.
-4. **Kernel quality dominates `T_G`.** 10.4 GOPS naive vs ~150 GOPS TPU on the same GEMM means a
-   naive Mali prefix would look useless. Write the tiled GEMM before believing any `T_G`.
+1. **Does the physical GPU beat the TPU once the GEMM is tiled?** (decides `T_G/T_N` and thus `k_b*`)
+2. **Can several ops (a whole block, or FFN up+down) live in one ≤384-token graph**, or must each
+   GEMM be a separate compilation? Per-dispatch overhead ~6 ms × 40 dispatches/block would eat the
+   compute budget.
+3. **Does the ceiling scale with `N`?** At `N=1536, M=1530` the compile was refused like `M=448, N=8960`
+   — same token limit, so it looks like an activation/token bound, but sweep `N` at fixed `M=384`.
+4. **VAE decode path** — untouched so far; NNAPI has no `CONV_3D`, so this is either decomposed 2D convs
+   on the TPU or OpenCL on Mali. Measure both before choosing.

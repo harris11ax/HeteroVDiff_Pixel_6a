@@ -49,9 +49,12 @@ static const char* nn_rc(int rc) {
         case 2: return "INCOMPLETE";
         case 3: return "UNEXPECTED_NULL";
         case 4: return "BAD_DATA";
-        case 5: return "BAD_STATE";
-        case 6: return "OP_FAILED";
-        case 8: return "UNMAPPABLE";
+        case 5: return "OP_FAILED";
+        case 6: return "BAD_STATE";
+        case 7: return "UNMAPPABLE";
+        case 8: return "OUTPUT_INSUFFICIENT_SIZE";
+        case 9: return "UNAVAILABLE_DEVICE";
+        case 10: return "DEAD_OBJECT";
         default: return "OTHER";
     }
 }
@@ -165,32 +168,35 @@ static int nnapi_fc(ANeuralNetworksDevice* dev, const char* tag, int M, int K, i
     rc = ANeuralNetworksCompilation_finish(comp);
     if (rc) { p("  %s comp_finish rc=%d(%s)", tag, rc, nn_rc(rc)); *why = "comp_finish"; return -rc; }
 
-    ANeuralNetworksExecution* ex = nullptr;
-    rc = ANeuralNetworksExecution_create(comp, &ex);
-    if (rc) { *why = "exec_create"; return -rc; }
-
     std::vector<int8_t> A((size_t)M * K, 1), O((size_t)M * N, 0);
-    ANeuralNetworksExecution_setInput(ex, 0, nullptr, A.data(), A.size());
-    ANeuralNetworksExecution_setOutput(ex, 0, nullptr, O.data(), O.size());
-
-    ANeuralNetworksExecution_setMeasureTiming(ex, true);   // enables getDuration
     int good = 0;
     double t0 = now_ms();
+    uint64_t dur_ns = 0; bool have_dur = false;
     for (int i = 0; i < iters; ++i) {
-        rc = ANeuralNetworksExecution_compute(ex);
-        if (rc) { p("  %s exec rc=%d(%s)", tag, rc, nn_rc(rc)); *why = "exec_compute"; break; }
+        // a fresh Execution per compute: reusing one after compute() returns BAD_STATE here
+        ANeuralNetworksExecution* exi = nullptr;
+        rc = ANeuralNetworksExecution_create(comp, &exi);
+        if (rc) { *why = "exec_create"; break; }
+        ANeuralNetworksExecution_setMeasureTiming(exi, true);
+        ANeuralNetworksExecution_setInput(exi, 0, nullptr, A.data(), A.size());
+        ANeuralNetworksExecution_setOutput(exi, 0, nullptr, O.data(), O.size());
+        rc = ANeuralNetworksExecution_compute(exi);
+        if (rc) {
+            p("  %s exec rc=%d(%s)", tag, rc, nn_rc(rc)); *why = "exec_compute";
+            ANeuralNetworksExecution_free(exi);
+            break;
+        }
+        if (i == 0 && ANeuralNetworksExecution_getDuration(
+                exi, ANEURALNETWORKS_DURATION_ON_HARDWARE, &dur_ns) == 0 && dur_ns != UINT64_MAX)
+            have_dur = true;
+        ANeuralNetworksExecution_free(exi);
         ++good;
     }
     double ms = good ? (now_ms() - t0) / good : -1;
-    if (good) {
-        uint64_t dur = 0;
-        if (ANeuralNetworksExecution_getDuration(ex, ANEURALNETWORKS_DURATION_ON_HARDWARE,
-                                                 &dur) == 0)
-            p("  %s OK ms_wall=%.3f ms_hw=%.3f out0=%d", tag, ms, dur / 1e6, (int)O[0]);
-        else
-            p("  %s OK ms_wall=%.3f out0=%d", tag, ms, (int)O[0]);
-    }
-    ANeuralNetworksExecution_free(ex);
+    if (good)
+        p("  %s OK ms_wall=%.3f ms_hw=%.3f out0=%d", tag, ms,
+          have_dur ? dur_ns / 1e6 : -1.0, (int)O[0]);
+
     ANeuralNetworksCompilation_free(comp);
     ANeuralNetworksModel_free(model);
     return good ? 1 : -3;
@@ -342,7 +348,9 @@ static int cl_import_probe(CLH* h, void* ptr, size_t bytes, void* import_target,
     if (!ctx) { p("%s ctx_fail=%d", tag, err); return 0; }
     cl_command_queue q = h->CreateCommandQueue(ctx, devs[0], 0, &err);
 
-    unsigned props[3] = {CL_IMPORT_TYPE_ARM, import_type, 0};  // zero-terminated
+    // cl_import_properties_arm is intptr_t (64-bit on arm64): a 32-bit array is
+    // read as one garbage 64-bit key and the driver answers CL_INVALID_PROPERTY (-64)
+    intptr_t props[3] = {CL_IMPORT_TYPE_ARM, (intptr_t)import_type, 0};
     cl_int ierr = -1;
     cl_mem m = h->ImportMemoryARM(ctx, CL_MEM_READ_WRITE, props, import_target, bytes, &ierr);
     if (!m) { p("%s import_FAIL err=%d props=0x%X", tag, ierr, import_type); return 0; }
@@ -424,8 +432,34 @@ static void section_import() {
     munmap(mp, bytes); close(fd);
 }
 
+static void run_single_fc(int M, int N, int src, int iters) {
+    uint32_t n = 0; ANeuralNetworks_getDeviceCount(&n);
+    ANeuralNetworksDevice* dev = nullptr;
+    for (uint32_t i = 0; i < n; ++i) {
+        ANeuralNetworksDevice* d = nullptr; ANeuralNetworks_getDevice(i, &d);
+        const char* nm = "?"; ANeuralNetworksDevice_getName(d, &nm);
+        if (strstr(nm, "edgetpu")) { dev = d; p("SINGLE device=%s", nm); }
+    }
+    if (!dev) { p("SINGLE no_edgetpu_device"); return; }
+    char tag[96];
+    snprintf(tag, sizeof(tag), "FC_edgetpu_%s_M%d_N%d", src ? "ahb" : "file", M, N);
+    const char* why = "";
+    int r = nnapi_fc(dev, tag, M, 1536, N, 0, iters, &why, src);
+    p("RESULT %s -> %d (%s)", tag, r, r > 0 ? "OK" : why);
+}
+
 int main(int argc, char** argv) {
     std::string what = argc > 1 ? argv[1] : "all";
+    if (what == "fc") {
+        int M = argc > 2 ? atoi(argv[2]) : 256;
+        int N = argc > 3 ? atoi(argv[3]) : 8960;
+        int src = argc > 4 ? atoi(argv[4]) : 1;
+        int it = argc > 5 ? atoi(argv[5]) : 3;
+        printf("==JSON_BEGIN==\n");
+        run_single_fc(M, N, src, it);
+        printf("==JSON_END==\n");
+        return 0;
+    }
     printf("==JSON_BEGIN==\n");
     if (what == "nnapi" || what == "all") section_nnapi();
     if (what == "import" || what == "all") section_import();
