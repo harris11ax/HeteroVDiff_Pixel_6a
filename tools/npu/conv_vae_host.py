@@ -34,9 +34,9 @@ DEVICE_DIR = REPO / "docs" / "device"
 OPS_JSON = REPO / "configs" / "vae_decode_ops.json"
 
 GATE_ZONES = ("TPU", "skin_therm1", "skin_therm2", "VIRTUAL-SKIN", "battery")
-# measured bracket (see ladder()): batched CONV_2D compiles at 0.78 MB/frame,
-# fails after ~31-36 s at 6.3 MB/frame; 2.4 MB is the midpoint of the bracket.
-MAX_BATCH_FRAME_MB = 2.4
+# measured bracket (see ladder()): batched CONV_2D compiles at 0.78 MB/frame and
+# FAILS after 31-33 s at 1.4 MB/frame, so the usable boundary is between them.
+MAX_BATCH_FRAME_MB = 1.0
 
 
 def kv_lines(stdout: str) -> list[dict]:

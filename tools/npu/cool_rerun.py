@@ -51,6 +51,9 @@ def main() -> int:
     ap.add_argument("--modes", default="single",
                     help="harness modes to run once the gate passes (single|downsep|down2|...)")
     ap.add_argument("--M", type=int, default=384)
+    ap.add_argument("--cmd", default=None,
+                    help="run THIS shell command after the gate passes instead of npu_host.py "
+                         "(e.g. the T_V conv sweep); logged and timestamped like any other run")
     args = ap.parse_args()
 
     LOG.write_text("", encoding="utf-8")
@@ -80,6 +83,13 @@ def main() -> int:
     if peak > gate:
         stamp("FATAL gate failed on confirm sample")
         return 3
+
+    if args.cmd:
+        stamp("RUN " + args.cmd)
+        rc = subprocess.call(args.cmd, shell=True, cwd=str(REPO))
+        stamp(f"HARNESS EXIT rc={rc}")
+        stamp("=== RUNNER EXIT ===")
+        return rc
 
     cmd = [sys.executable, str(REPO / "tools" / "npu" / "npu_host.py"),
            "--modes", args.modes, "--pc", "0", "--tiles", str(args.tiles),
