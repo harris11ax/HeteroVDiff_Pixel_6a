@@ -20,6 +20,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -W)"
   -DANDROID_STL=c++_static \
   -DCMAKE_BUILD_TYPE=Release
 
-"$CMAKE" --build "$HERE/build" --target probe
+"$CMAKE" --build "$HERE/build"
 
-echo "built: $HERE/build/probe"
+echo "built: $HERE/build/{probe,probe2}"

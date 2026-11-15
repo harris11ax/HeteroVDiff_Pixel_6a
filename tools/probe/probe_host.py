@@ -141,27 +141,52 @@ def run_probe(serial: str, mode: str, timeout: int = 900) -> dict:
 
 
 # ------------------------------------------------------------------ cooldown
-def read_max_temp(serial: str) -> float | None:
-    rc, txt = adb(serial, "shell sh -c 'cat /sys/class/thermal/thermal_zone*/temp'")
+TEMP_RE = re.compile(r"Temperature\{mValue=([-0-9.]+), mType=(-?\d+), mName=([A-Za-z0-9_\-]+)")
+
+
+def read_zones(serial: str) -> dict[str, float]:
+    """Named thermal zones from dumpsys thermalservice.
+
+    /sys/class/thermal/thermal_zone*/temp is Permission denied for the shell user
+    on Android 17 (verified), so dumpsys is the only unprivileged source. The
+    'Current temperatures from HAL' block is the live one; earlier blocks are
+    cached values, so the LAST occurrence of each name wins.
+    """
+    rc, txt = adb(serial, "shell dumpsys thermalservice", timeout=60)
     if rc != 0:
-        return None
-    vals = []
-    for line in txt.split():
+        return {}
+    zones: dict[str, float] = {}
+    for m in TEMP_RE.finditer(txt):
         try:
-            v = float(line.strip())
+            zones[m.group(3)] = float(m.group(1))
         except ValueError:
             continue
-        vals.append(v / 1000.0 if v > 1000 else v)
-    return max(vals) if vals else None
+    return zones
+
+
+def read_max_temp(serial: str, zones_wanted: list[str] | None = None) -> float | None:
+    zones = read_zones(serial)
+    if not zones:
+        return None
+    if zones_wanted:
+        sel = [v for k, v in zones.items() if k in zones_wanted]
+    else:
+        sel = list(zones.values())
+    return max(sel) if sel else None
 
 
 def cooldown(serial: str, target: float, poll: int = 30, max_wait: int = 3600) -> int:
     """Spec item 7: no timed run until the SoC is <= target C."""
     t0 = time.time()
     while True:
-        t = read_max_temp(serial)
+        z = read_zones(serial)
+        # TPU + GPU + skin are the zones that matter; fall back to all of them
+        keep = {k: v for k, v in z.items() if k in ("TPU", "skin_therm1", "skin_therm2",
+                                                    "battery", "VIRTUAL-SKIN")} or z
+        t = max(keep.values()) if keep else None
         el = int(time.time() - t0)
-        print(f"[{el:5d}s] max thermal zone = {t if t is None else f'{t:.1f} C'}")
+        detail = " ".join(f"{k}={v:.1f}" for k, v in sorted(keep.items()))
+        print(f"[{el:5d}s] max = {t if t is None else f'{t:.1f} C'}   ({detail})")
         if t is not None and t <= target:
             print(f"READY at {t:.1f} C after {el}s")
             return 0

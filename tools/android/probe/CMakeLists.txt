@@ -4,11 +4,13 @@ project(pixel6a_probe CXX)
 set(CMAKE_CXX_STANDARD 17)
 
 add_executable(probe probe.cpp)
+add_executable(probe2 probe2.cpp)
 
 # android    -> AHardwareBuffer_* (libandroid)
 # neuralnetworks -> NNAPI (deprecated in Android 15 but still present/served on Pixel)
 # dl, log    -> dlsym/libOpenCL.so and __android_log
 target_link_libraries(probe android neuralnetworks dl log)
+target_link_libraries(probe2 android neuralnetworks dl log)
 
 # No OpenCL headers on purpose: the probe resolves libOpenCL.so with dlopen()
 # and declares the handful of CL types it needs, so nothing is required at
