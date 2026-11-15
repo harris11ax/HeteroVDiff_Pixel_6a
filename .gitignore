@@ -18,6 +18,10 @@ __pycache__/
 *.pyc
 .venv/
 
+# device-run scratch state (agent-only, never committed)
+docs/device/.measurement_in_flight
+docs/device/.cool_rerun.log
+
 # editors / OS
 .vscode/
 .idea/
