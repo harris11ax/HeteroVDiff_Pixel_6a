@@ -1,0 +1,56 @@
+{
+  "serial": "25311JEGR11811",
+  "timestamp": "20261115_152337",
+  "mode": "peak",
+  "iters": 5,
+  "M_block": 1530,
+  "rc": 0,
+  "kernel_sha256": "6611071579404d3e",
+  "binary_sha256": "b9e18c9b74f65030",
+  "temps": {
+    "before": {
+      "neutral_therm": 29.813002,
+      "charger_skin_therm": 31.572002,
+      "VIRTUAL-USB-UI": 0.0,
+      "disp_therm": 28.634,
+      "quiet_therm": 29.034002,
+      "skin_therm1": 30.414001,
+      "skin_therm2": 31.171001,
+      "battery": 28.800001,
+      "TPU": 32.0,
+      "usb_pwr_therm2": 28.723001,
+      "cellular-emergency": 30.220402,
+      "gnss_tcxo_therm": 30.258001,
+      "VIRTUAL-SKIN": 30.220402
+    },
+    "after": {
+      "neutral_therm": 29.813002,
+      "charger_skin_therm": 31.572002,
+      "VIRTUAL-USB-UI": 0.0,
+      "disp_therm": 28.634,
+      "quiet_therm": 29.034002,
+      "skin_therm1": 30.414001,
+      "skin_therm2": 31.171001,
+      "battery": 28.800001,
+      "TPU": 36.0,
+      "usb_pwr_therm2": 28.723001,
+      "cellular-emergency": 30.220402,
+      "gnss_tcxo_therm": 30.258001,
+      "VIRTUAL-SKIN": 30.220402
+    }
+  },
+  "parsed": {
+    "device": {
+      "name": "Mali-G78",
+      "r0p0": "",
+      "cus": "20",
+      "max_clock_mhz": "848"
+    },
+    "builds": [],
+    "verify": [],
+    "gemm": [],
+    "block": [],
+    "f16": [],
+    "fatal": []
+  }
+}

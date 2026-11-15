@@ -127,16 +127,18 @@
     "decision_source": "docs/device/probe_<ts>.json (Gate 0)"
   },
   "rates": {
-    "T_G_s_per_block": null,
+    "T_G_solo_s_per_block": 0.1618,
+    "T_G_solo_gops": 877.0,
+    "T_G_co_run_s_per_block": null,
     "T_N_s_per_block": null,
     "T_V_s_per_chunk": null,
-    "status": "TBD (blocked: no device attached)",
-    "note": "must be measured with both engines co-running, at the target resolution and thermal state"
+    "status": "T_G solo measured (0.1618 s/block, Mali 64x64x32 tile 8x4); T_N, T_V, co-run T_G = TBD (blocked: token-tiled NPU block graph and VAE decode path not built)",
+    "note": "must be measured with both engines co-running, at the target resolution and thermal state; report the solo number as a kernel rate only"
   },
   "cut": {
     "formula": "period(k_b) = max(k_b*T_G, (B-k_b)*T_N + T_V); k* = (B*T_N + T_V)/(T_N + T_G)",
     "k_b": null,
-    "status": "TBD (blocked on rates)"
+    "status": "TBD (blocked on T_N, T_V and the co-run T_G)"
   },
   "gates": {
     "gate_1_artifact": {
@@ -214,5 +216,57 @@
     "graph_token_ceiling": 384,
     "tiles_at_preset_a": 4,
     "graph_shape": "one graph per (block, token-tile) candidate; whole-block graphs untested"
+  },
+  "mali_int8_gemm": {
+    "_comment": "Measured on the device 2026-11-15. Evidence: docs/device/RESULTS_gemm_mali.md + docs/device/gemm_mali_20261115_152103.json",
+    "dot_peak_gops": 1655.5,
+    "dot_peak_gmac_s": 827.75,
+    "dot_peak_note": "dg_peak_dot 827.8 GMAC/s vs dg_peak_mac4 124.2 GMAC/s (6.7x) vs dg_peak_mad1 15.5 => arm_dot_acc is a real SDOT; the 'unknown extension' build warning is benign. Nameplate 2170 GOPS -> probe reaches 76%. Evidence: docs/device/gemm_mali_20261115_152337.json",
+    "emulated_dot_gops": 248.3,
+    "single_mad24_gops": 30.9,
+    "deployed_kernel": {
+      "file": "tools/android/gemm/kernels/gemm8.cl",
+      "block_tile": [
+        64,
+        64
+      ],
+      "k_depth": 32,
+      "thread_tile": [
+        8,
+        4
+      ],
+      "accumulators": 32,
+      "private_mem_bytes_per_thread": 0,
+      "local_mem_bytes_per_wg": 16640,
+      "dot_ceiling_fraction": 0.53
+    },
+    "gops_by_shape_at_M1530": {
+      "attn_1536x1536": 751.0,
+      "ffn_up_1536x8960": 869.0,
+      "ffn_down_8960x1536": 890.0
+    },
+    "block_time_ms": {
+      "64x64x32_t8x4": 161.8,
+      "64x64x16_t8x4": 168.6,
+      "64x64x16_t8x8_spilled": 732.7
+    },
+    "block_gops": {
+      "64x64x32_t8x4": 877.0
+    },
+    "block_macs": 70991000,
+    "bounds_comparison": {
+      "vs_tpu_532ms": 3.29,
+      "vs_naive_14600ms": 90.0,
+      "vs_1tops_152ms": 0.94
+    },
+    "lora_delta_ms_per_block": {
+      "fused_add_precomputed": 0.0,
+      "fused_add_note": "161.46 vs 161.82 ms: within run-to-run noise, the epilogue add is free",
+      "computed_fp16_factors": 226.0,
+      "computed_int8_factors": 41.0,
+      "naive_rankR_loop": 472.9
+    },
+    "implication": "GPU ~3.3x FASTER per block than the TPU bound -> the paper's premise inverts on Tensor G1; T_G << T_N and k_b* lands late. Roles are not swapped (nothing refuses delegation); the closed-form cut is simply solved with the measured rates.",
+    "caveat": "solo kernel rate. Stage rates must be co-run measured (locked rule) - T_G co-run, T_N token-tiled graph, T_V all still TBD."
   }
 }
