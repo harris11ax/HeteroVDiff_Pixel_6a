@@ -14,13 +14,22 @@ python phase1_quant/inspect_weights.py --manifest configs/block_manifest.json
 |---|---|---|
 | tensors | 1317, all **F32** (5.73 GiB on disk) | — |
 | total parameters | **1,539,041,408** | 1.419 B semantic + 94.4 M LoRA + 25.6 M timestep = 1.539 B ✓ |
+| — stock `diffusers.WanTransformer3DModel` from `config.json` | **1,418,996,800** | paper: semantic expert 1,419 M ✓ |
+| — + LoRA factors | 94,371,840 | paper: 94.4 M ✓ |
+| — + detail-expert timestep block | 25,672,768 | paper: 25.6 M ✓ |
+| sum check | 1,418,996,800 + 94,371,840 + 25,672,768 = **1,539,041,408** | ✅ exact |
 | params per DiT block | **49,586,432** (uniform across all 30) | — |
-| INT8 region per block | **47.29 MiB** | paper 47.3 MiB ✓ |
+| INT8 region per block | **47.29 MiB** (30 regions = 1,418.7 MiB) | paper 47.3 MiB ✓ |
 | base attention (INT8) | 566,231,040 params = **0.527 GiB** | paper 541.4 MiB ✓ |
 | base FFN (INT8) | 825,753,600 params = **0.769 GiB** | paper 787.5 MiB ✓ |
-| LoRA A + B | 94,371,840 params = **90.0 MiB** | paper 94.4 M ✓ |
-| detail-expert timestep block | 25,672,768 params = **24.5 MiB** | paper 25.6 M ✓ |
-| **full INT8 base artifact** | **1.296 GiB** + 114.5 MiB factors | blueprints says ~1.47 GiB (close; the difference is whether bias/norms/embeds are counted) |
+| LoRA A + B | 94,371,840 params = **90.0 MiB INT8 / 180.0 MiB FP16** | paper 94.4 M, 91.5 MiB ✓ |
+| detail-expert timestep block | 25,672,768 params = **24.5 MiB INT8 / 49.0 MiB FP16** | paper 25.6 M ✓ |
+| **everything in INT8** | **1,467.7 MiB** | blueprint: "~1.47 GiB" ✅ exact |
+| **block regions only (INT8)** | **1,418.7 MiB** | paper's 1,423 MiB total ✅ (their +4 MiB = scales) |
+
+The blueprint's 1.47 GiB and the paper's 1,423 MiB are **both right but count different things**:
+1.47 GiB is every parameter at 1 byte; 1,423 MiB is base + scales + factors without the
+top-level embeddings. The allocator only ever needs the **47.29 MiB per-block region**.
 
 The per-block INT8 region (47.29 MiB) is the allocator unit — 30 regions, each far below any
 plausible `AHardwareBuffer` ceiling. **No 32×32 HMX tiling is needed on Pixel** (see

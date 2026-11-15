@@ -150,7 +150,7 @@ Do **not** pre-commit to any of these. Gate 0 measures `T_G/T_N/T_V` first.
 | §1 row 3/6 | "frame interpolation, 1 conditioning frame" | T2V only (§5 above) |
 | §1 row 4 | "Edge TPU via Android NNAPI" with "custom OpenCL INT8 GEMM on Mali" — correct in outline | but the NPU side is a **graph**, not kernels |
 | §5.3 Gate 1 | "combined RSS < 2.2 GiB" | RSS on Android includes shared pages; measure `dumpsys meminfo` **PSS** and report both, or count tensor bytes like the paper does |
-| §1 row 2 | "single canonical INT8 base-weight artifact (~1.47 GiB across all 30 blocks)" | measured: **1.296 GiB** base (1.385 GiB total per-block regions) + 114.5 MiB factors |
+| §1 row 2 | "single canonical INT8 base-weight artifact (~1.47 GiB across all 30 blocks)" | correct at 1 byte/param: measured **1,467.7 MiB** for all 1,539,041,408 params; 30 block regions alone are 1,418.7 MiB |
 
 ## 8. Thermal realism
 

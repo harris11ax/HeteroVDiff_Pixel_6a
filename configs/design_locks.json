@@ -27,8 +27,11 @@
       "base_ffn_params": 825753600,
       "lora_params": 94371840,
       "expert_timestep_params": 25672768,
-      "int8_base_artifact_gib": 1.296,
-      "expert_factors_mib": 114.5
+      "int8_all_params_mib": 1467.7,
+      "int8_block_regions_mib": 1418.7,
+      "expert_factors_mib_int8": 114.5,
+      "expert_factors_mib_fp16": 229.0,
+      "stock_diffusers_params": 1418996800
     }
   },
   "quantisation": {
