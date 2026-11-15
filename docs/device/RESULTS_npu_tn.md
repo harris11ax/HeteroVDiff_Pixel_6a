@@ -1,7 +1,9 @@
 # T_N — token-tiled NNAPI block graph on the Tensor Edge TPU
 
-Raw captures: `docs/device/npu_tn_20261115_1531{06,42,31}.json` (validation), `…_153502.json`,
-`…_153652.json` (timed), `…_153817.json` (isolated `ffn.down`).
+Raw captures: `docs/device/npu_tn_20261115_153311.json` (validation + per-column rejection),
+`…_153427.json` (whole-block graph, device went down), `…_153502.json` and `…_153652.json` (timed),
+`…_153817.json` (isolated `ffn.down`). The `.json` files are gitignored; the `.md` siblings are
+committed.
 Harness: `tools/android/npublock/npu_block.cpp` · host driver `tools/npu/npu_host.py`.
 
 **Status: T_N is still TBD.** Nine of the block's ten GEMMs are measured; the tenth
