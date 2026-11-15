@@ -140,7 +140,9 @@
     "T_N_ffn_down_mali_s_per_block": 0.04733,
     "T_N_ffn_down_tpu_over_mali": 5.45,
     "T_N_over_T_G_lower_bound": 2.58,
-    "T_N_over_T_G_measured_sum": 4.18
+    "T_N_over_T_G_measured_sum": 4.18,
+    "T_N_hybrid_mali_down_s_per_block": 0.4651,
+    "T_N_hybrid_note": "0.4178 (9/10 on the TPU, gate-compliant capture) + 0.04733 (ffn.down on Mali, MEASURED) = 0.4651 s/block -> T_N/T_G = 2.87. Use THIS T_N if ffn.down lands on Mali, which is the engineering recommendation; the 0.6758 / 4.18x figure above is the all-TPU architecture. Solving the cut with the wrong one moves k_b*."
   },
   "cut": {
     "formula": "period(k_b) = max(k_b*T_G, (B-k_b)*T_N + T_V); k* = (B*T_N + T_V)/(T_N + T_G)",
