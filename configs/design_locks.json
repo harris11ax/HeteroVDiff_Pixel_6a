@@ -147,14 +147,19 @@
     "T_V_conv_tpu_gops": 969.7,
     "T_V_conv_tpu_macs": 5117300000000.0,
     "T_V_conv_tpu_status": "COMPLETE gate-compliant measured sum over 100% of the decode conv MACs, as kT shifted 2-D CONV_2D taps, one execute per frame per tap (batch>1 will not compile above ~1 MB/frame). Sweep start TPU 32.0 C vs a 32.1 C battery+3 gate (PASS, confirmed on a second sample); the two dominant classes (68% of MACs) ran at that floor. T_V_s_per_chunk stays null because the mid-block 3-D attention (32.4 GMAC, 6120 tokens) is not a conv and has no measured rate (0.6% of MACs), and the Mali branch is unmeasured. Hot control run (18:17): 11.412 s -> the cool run is 7.5% faster. Evidence: docs/device/RESULTS_vae_tv.md, conv_sweep_20261115_182512.json.",
-    "T_V_conv_tpu_note": "CONV_2D reaches 685-1842 GOPS on this HAL vs 285 GOPS for FULLY_CONNECTED: the Edge TPU is a conv engine and the DiT block's 10 GEMMs are being served by the wrong op class. Worth testing ffn.up/attn as 1x1 CONV_2D before accepting the 4.18x T_N/T_G penalty as silicon.",
+    "T_V_conv_tpu_note": "CONV_2D reaches 719-2024 GOPS on this HAL on the gate-compliant run (685-1842 on the hot control) vs 285 GOPS for FULLY_CONNECTED: the Edge TPU is a conv engine and the DiT block's 10 GEMMs are being served by the wrong op class. Worth testing ffn.up/attn as 1x1 CONV_2D before accepting the 4.18x T_N/T_G penalty as silicon.",
     "T_V_conv_tpu_hot_s_per_chunk": 11.412,
     "T_V_decode_vs_T_G_blocks": 65.2
   },
   "cut": {
     "formula": "period(k_b) = max(k_b*T_G, (B-k_b)*T_N + T_V); k* = (B*T_N + T_V)/(T_N + T_G)",
+    "B_block_executions_per_chunk": 180,
+    "B_note": "6 denoising steps x 30 DiT blocks per 9-frame chunk (docs/00_START_HERE.md, docs/02_model_spec.md). The formula needs B and it existed only in prose.",
     "k_b": null,
-    "status": "TBD (blocked on T_V and the co-run T_G; T_N is now a measured sum at 0.6758 s/block, but the locked rule still requires a co-run stage rate before k_b* is solved)"
+    "k_b_solo_estimate": 157.8,
+    "k_b_solo_estimate_note": "SOLO-rate estimate ONLY - it does not satisfy the locked co-run rule, so k_b stays null. With B=180, T_G=0.1618, T_V=10.554 and all-TPU T_N=0.6758: k* = 157.8 blocks (87.7% on Mali), both sides balance at 25.54 s against 39.68 s for all-180-blocks-plus-decode serial on Mali -> 1.55x. With the hybrid T_N=0.4651 (ffn.down on Mali): k* = 150.4 (83.5%), period 24.33 s, 1.63x. k_b* lands LATE as predicted, and T_V is 41-43% of the period either way.",
+    "next_measurement_priority": "T_V on the GPU (Mali conv branch) moves k_b* more than anything else outstanding: a 2x error in T_V shifts the period by up to 22%, while the mid-block 3-D attention is ~0.63% of T_V (67 ms at the measured conv rate). Co-run T_G still gates the locked number.",
+    "status": "TBD (k_b stays null pending the locked co-run T_G; T_N = 0.6758 all-TPU / 0.4651 hybrid and T_V conv = 10.554 s are measured, so the cut is solvable the moment T_G co-run exists)"
   },
   "gates": {
     "gate_1_artifact": {
