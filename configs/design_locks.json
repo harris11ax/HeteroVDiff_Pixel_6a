@@ -7,17 +7,43 @@
     "L_blocks": 30,
     "N_steps": 6,
     "B_block_executions": 180,
-    "timesteps": [1000, 992, 982, 949, 905, 810],
+    "timesteps": [
+      1000,
+      992,
+      982,
+      949,
+      905,
+      810
+    ],
     "detail_expert_threshold_t": 978,
     "kappa_switch_step": 3,
-    "expert_schedule": ["semantic", "semantic", "semantic", "detail", "detail", "detail"],
+    "expert_schedule": [
+      "semantic",
+      "semantic",
+      "semantic",
+      "detail",
+      "detail",
+      "detail"
+    ],
     "d_model": 1536,
     "heads": 12,
     "head_dim": 128,
     "ffn_dim": 8960,
     "ffn_activation": "gelu_tanh_approximate",
-    "patch_size": [1, 2, 2],
-    "rope": {"theta": 10000.0, "head_dim_split": {"t": 44, "h": 42, "w": 42}, "max_seq_len": 1024},
+    "patch_size": [
+      1,
+      2,
+      2
+    ],
+    "rope": {
+      "theta": 10000.0,
+      "head_dim_split": {
+        "t": 44,
+        "h": 42,
+        "w": 42
+      },
+      "max_seq_len": 1024
+    },
     "measured": {
       "total_params": 1539041408,
       "params_per_block": 49586432,
@@ -36,10 +62,20 @@
   },
   "quantisation": {
     "scheme": "per-output-column symmetric int8, s_j = max_i |W_ij| / 127",
-    "clip": [-127, 127],
+    "clip": [
+      -127,
+      127
+    ],
     "weight_layout": "row-major [N_out, K], K contiguous",
     "hmx_tiling": "dropped (no HMX on Tensor G1)",
-    "fp16_kept": ["bias", "norm weights", "scale_shift_table (AdaLN)", "patch_embedding", "proj_out", "condition_embedder*"],
+    "fp16_kept": [
+      "bias",
+      "norm weights",
+      "scale_shift_table (AdaLN)",
+      "patch_embedding",
+      "proj_out",
+      "condition_embedder*"
+    ],
     "expert_factors": "factorised, FP16, never merged into the INT8 base",
     "activation_numerics": {
       "gpu_hidden_state": "fp16 + per-GEMM calibrated input scale (max|x|/127)",
@@ -47,22 +83,46 @@
     }
   },
   "workload": {
-    "nature": "text-to-video chunk stream (checkpoint has no image conditioning)",
+    "nature": "9-frame text-to-video chunk stream; conditioned only on umT5 text embeddings precomputed offline on the host (text encoder never resident on the device)",
     "frames_per_chunk": 9,
     "latent_frames_Fz": 3,
     "chunks_per_stream": 10,
     "presets": {
-      "baseline": {"h": 256, "w": 256, "H_z": 32, "W_z": 32, "M": 768},
-      "preset_a": {"h": 272, "w": 480, "H_z": 34, "W_z": 60, "M": 1530},
-      "preset_b": {"h": 480, "w": 832, "H_z": 60, "W_z": 104, "M": 4680}
+      "baseline": {
+        "h": 256,
+        "w": 256,
+        "H_z": 32,
+        "W_z": 32,
+        "M": 768
+      },
+      "preset_a": {
+        "h": 272,
+        "w": 480,
+        "H_z": 34,
+        "W_z": 60,
+        "M": 1530
+      },
+      "preset_b": {
+        "h": 480,
+        "w": 832,
+        "H_z": 60,
+        "W_z": 104,
+        "M": 4680
+      }
     },
     "primary_preset": "preset_a",
-    "primary_preset_assumed": true
+    "vfi_conditioning": "REMOVED - no start-frame conditioning exists in this checkpoint (decided 2026-11-15)"
   },
   "engines": {
-    "process_a": {"target": "Mali-G78 MP20 via OpenCL", "role": "prefix blocks [0, k_b)"},
-    "process_b": {"target": "Tensor Edge TPU via NNAPI", "role": "suffix blocks [k_b, 180) + VAE decode"},
-    "second_engine_fallback": "undecided — CPU cluster via XNNPACK if Gate 0 shows Mali is not a viable stage",
+    "process_a": {
+      "target": "Mali-G78 MP20 via OpenCL",
+      "role": "prefix blocks [0, k_b)"
+    },
+    "process_b": {
+      "target": "Tensor Edge TPU via NNAPI",
+      "role": "suffix blocks [k_b, 180) + VAE decode"
+    },
+    "second_engine_fallback": "locked: always ship the measured closed-form k_b* >= 1, even when small ([5,25]) and the gain is 1.05-1.15x; if NNAPI refuses Edge-TPU delegation (T_N >> T_G), invert roles - faster engine takes the prefix, slower takes suffix+VAE, same period equation",
     "zero_copy_route": "undecided: A (AHardwareBuffer + SCM_RIGHTS) -> B (file-backed MAP_SHARED mmap) -> C (private copies, Gate-2 failure)",
     "decision_source": "docs/device/probe_<ts>.json (Gate 0)"
   },
@@ -79,10 +139,27 @@
     "status": "TBD (blocked on rates)"
   },
   "gates": {
-    "gate_1_artifact": {"status": "pending", "targets": "int8 bytes = 1.296 GiB +/- 1 MiB; PSNR >= 28 dB, SSIM >= 0.92 vs FP32 (host simulation)"},
-    "gate_2_zero_copy": {"status": "pending", "targets": "same DMA-BUF inode / file mapped by both runtimes; no second base-weight copy"},
-    "gate_3_thermal": {"status": "pending", "targets": "every timed run starts at max(SoC zone) <= ambient + 3 C"},
-    "gate_4_parity": {"status": "pending", "targets": "per-block cosine >= 0.999 vs FP32; frame PSNR >= 28 dB, SSIM >= 0.92"},
-    "gate_5_memory": {"status": "pending", "targets": "PSS(proc A) + PSS(proc B) < 2.2 GiB"}
-  }
+    "gate_1_artifact": {
+      "status": "pending",
+      "targets": "int8 bytes = 1.296 GiB +/- 1 MiB; PSNR >= 28 dB, SSIM >= 0.92 vs FP32 (host simulation)"
+    },
+    "gate_2_zero_copy": {
+      "status": "pending",
+      "targets": "same DMA-BUF inode / file mapped by both runtimes; no second base-weight copy"
+    },
+    "gate_3_thermal": {
+      "status": "pending",
+      "targets": "every timed run starts at max(SoC zone) <= ambient + 3 C"
+    },
+    "gate_4_parity": {
+      "status": "pending",
+      "targets": "per-block cosine >= 0.999 vs FP32; frame PSNR >= 28 dB, SSIM >= 0.92"
+    },
+    "gate_5_memory": {
+      "status": "pending",
+      "targets": "PSS(proc A) + PSS(proc B) < 2.2 GiB"
+    }
+  },
+  "repo": "https://github.com/harris11ax/HeteroVDiff_Pixel_6a (public)",
+  "decisions_locked_2026_11_15": true
 }

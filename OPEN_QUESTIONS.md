@@ -1,7 +1,20 @@
 # Open questions — decisions the student owns
 
-Each item has a recommended default; the repo is already configured to assume it (marked
-`"assumed": true` in `configs/design_locks.json`) so work is not blocked while answers arrive.
+## Answered by the student (2026-11-15) — locked
+
+| Q | decision |
+|---|---|
+| Q1 workload | **Drop the 1-start-frame + 8-synthesised VFI logic entirely.** Workload is 9-frame **text-to-video** stream synthesis: `F_z = 3` latent temporal positions, conditioned only on **umT5 text embeddings precomputed offline on the host** (the text encoder never consumes Pixel 6a RAM). |
+| Q2 device | Pixel 6a to be attached; Gate 0 runs as soon as `adb devices` lists it. |
+| Q3 resolution | **Preset A (480×272, 9 frames, `3×34×60`, `M = 1,530`, ~28 MiB attention activation per block)** is the primary target. Use 256×256 only as a fast loop; 832×480 is opt-in. |
+| Q4 second engine | **Always commit to the measured closed-form cut `k_b* ≥ 1`**, even when it is small (`[5,25]`) and the speedup is modest (1.05–1.15×); explain the shift with Eq. 4 as a systems finding. If NNAPI refuses Edge-TPU delegation (all ops on `cpu`, `T_N ≫ T_G`), **invert the roles** (faster engine takes the prefix, slower takes suffix+VAE) with the same period equation — do not substitute a third engine unannounced. |
+| Q5 publishing | **Public repo from the start**: https://github.com/harris11ax/HeteroVDiff_Pixel_6a |
+
+---
+
+## Earlier open questions (kept for the record)
+
+Each item had a recommended default; the repo was configured to assume it while answers were pending.
 
 ---
 

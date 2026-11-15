@@ -130,14 +130,21 @@ outcomes and what each means:
 |---|---|
 | `T_G < T_N` (GPU faster per block) | the cut formula still works; GPU simply takes the larger prefix; report the ratio — it is a *stronger* result than the paper's |
 | `T_G ≈ T_N` | few blocks left for a pipeline; gain comes mostly from overlapping the VAE decode; report honestly |
-| `T_G ≫ T_N` (GPU too slow, like the paper) | the pipeline still wins on *stream* throughput as long as `k_b·T_G < (B−k_b)·T_N + T_V`; but a tiny `k_b` means the GPU contributes ~nothing — then state that HeteroVDiff's premise (GPU as a real second stage) does not hold on Tensor G1 and report the measured ceiling |
+| `T_G ≫ T_N` (GPU much slower, like the paper) | the pipeline still wins on *stream* throughput: the GPU only has to finish its small prefix `[0, k_b*)` in the time the NPU takes for the suffix plus the decoder. Committing to the measured closed-form cut is the policy — see below |
 
-If the GPU turns out unusable, the *design-preserving* fallback is to make the second stage the
-**CPU cluster** (2× Cortex-X1 + 2× A76 via XNNPACK INT8) instead of the Mali GPU. Same
-architecture — two processes, one INT8 artifact, one block-level cut, co-run rate measurement —
-and it is defensible in the report as "the second engine that Tensor G1 actually exposes".
+**Locked policy (decided 2026-11-15).** Always ship the measured `k_b*` from Gate 0, **including
+when it is small** (`k_b* ∈ [5,25]`) and the resulting gain is modest (1.05–1.15× instead of 1.35×).
+A shift of the balance point toward the faster engine, measured on a 2021 Tensor G1, is itself the
+systems finding the report is about: `k_b* = 16` with `T_G = 10·T_N` is a *prediction of Eq. 4* that
+you then verify. Do not retune to make the number look like the paper's.
 
-Do **not** pre-commit to any of these. Gate 0 measures `T_G/T_N/T_V` first.
+**Only if NNAPI refuses to delegate** DiT blocks to the Edge TPU (everything lands on `cpu`, so
+`T_N ≫ T_G`): **invert the roles** — the faster engine takes the prefix `[0, k_b*)`, the slower one
+takes the suffix plus the VAE, using the identical period equation
+`period(k_b) = max(k_b·T_G, (B−k_b)·T_N + T_V)` with the role labels swapped, or compare GPU-only
+against GPU+CPU/TPU co-execution. The design (single INT8 copy, one block-level cut, two stages)
+survives the inversion; only the labels change. Do **not** silently substitute the CPU cluster as
+"Process A" — measure, then state which engine each stage ran on in every table.
 
 ## 7. Concrete blueprint bugs (fix before use)
 
