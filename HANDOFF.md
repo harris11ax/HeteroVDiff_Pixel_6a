@@ -1,7 +1,7 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-15 (evening). This file is the orders sheet: read it first, then
-`docs/00_START_HERE.md`. Last commit before this update: `bb05143`.*
+*Updated 2026-11-15 (night). This file is the orders sheet: read it first, then
+`docs/00_START_HERE.md`. The `T_N` harness landed with this update; last commit before it: `8280bbc`.*
 
 ## Mission
 
@@ -21,11 +21,12 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | Gate 0 (capabilities) | **done** → `docs/device/RESULTS_gate0.md` |
 | Gate 2 (zero-copy) | **pass** on both routes; file-mmap route B preferred |
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
+| **NPU block graph (`T_N`)** | **partial** → `docs/device/RESULTS_npu_tn.md`; 9/10 GEMMs measured (0.4112 s/block, ≥2.54× `T_G`), `ffn.down` has no compilable graph |
 | Gate 1 (artifact) | pending — quantiser not written yet (`phase1_quant/` has only the inspector) |
 | Gates 3–5 | pending |
 | Blocker | `T_N`, `T_V`, co-run `T_G` unmeasured ⇒ `k_b*` still TBD |
 
-## The one result that changed the project
+## The two results that changed the project
 
 The tiled Mali kernel runs a Preset-A DiT block in **161.8 ms** (877 GOPS) against the Edge TPU
 arithmetic bound of **532 ms**. The GPU is **3.3× faster per block** than the TPU, not 31.6×
@@ -34,23 +35,38 @@ NPU takes the suffix) **inverts on Tensor G1**. Per the locked policy this is re
 tuned: `k* = (B·T_N + T_V)/(T_N + T_G)` now lands late, so the GPU takes nearly the whole
 trajectory and the NPU's real job becomes covering the VAE decode.
 
-Caveat that must survive into the paper: 161.8 ms is a **solo** kernel rate. Every stage rate in
-the cut must come from a co-run measurement.
+The TPU side then got measured (2026-11-15, `RESULTS_npu_tn.md`) and is **worse than the
+arithmetic bound, for structural reasons**: 9 of the block's 10 GEMMs run at 204–288 GOPS
+(`ffn.up` 36.74 ms/tile = 288 GOPS), summing to **≥ 0.4112 s/block — already ≥ 2.54× `T_G`** for
+70 % of the MACs. Three hard limits: a whole-block single graph **reboots the phone** in
+`Compilation_finish`; `ffn.down` (K=8960) **never compiles** (`DEAD_OBJECT` after ~62 s); and
+**per-output-column weight scales are rejected by `FULLY_CONNECTED`** at `addOperation`, so the
+locked quantisation cannot be expressed on the NPU stage. `T_N` stays null until `ffn.down` has a
+graph and the rates are re-taken from the idle floor.
+
+Caveat that must survive into the paper: 161.8 ms and the NPU per-GEMM rates are **solo** kernel
+rates, and the NPU ones were taken hot. Every stage rate in the cut must come from a co-run
+measurement.
 
 ## Ordered next actions
 
-1. **`T_N` — token-tiled NPU block graph.** One NNAPI graph per (block, token-tile) at M=384,
-   4 tiles for Preset A, chained inside one Execution where the compiler allows it. Measure
-   s/block. This is the missing half of the cut. Traps already known:
-   `docs/device/RESULTS_gate0.md` §"Getting an NNAPI graph to validate".
-2. **`T_V` — VAE decode.** No `CONV_3D` in NNAPI: either decompose the causal 3D convs into
+1. **Cool re-run of `T_N`.** `python tools/npu/npu_host.py --modes single --pc 0 --tiles 4 --M 384
+   --cooldown 30` from the idle floor → gate-compliant per-GEMM rates (~90 s of device time). The
+   harness is built and committed; only the thermal state was wrong.
+2. **`ffn.down` path** — the down projection has no compilable FC. Pick and measure one of:
+   chunked-K FC + `ADD` (2× K=4480 or 4× K=2240) on the TPU, or the down projection on Mali
+   (OpenCL, where the tiled kernel already runs this shape at 890 GOPS per `RESULTS_gemm_mali.md`).
+3. **Per-column scales vs the NPU stage.** `FULLY_CONNECTED` only takes per-tensor weight scales.
+   Either the NPU graph uses per-tensor scales (measure the Gate 1/4 parity cost) or the NPU is
+   restricted to shapes with an equivalent path. This touches `design_locks.json` → student's call.
+4. **`T_V` — VAE decode.** No `CONV_3D` in NNAPI: either decompose the causal 3D convs into
    shifted 2D `CONV_2D` taps on the TPU, or decode on Mali in OpenCL. Measure both, report both.
-3. **Co-run `T_G`.** Two processes, one file-mapped artifact, GPU on blocks `[0,k)` while the
+5. **Co-run `T_G`.** Two processes, one file-mapped artifact, GPU on blocks `[0,k)` while the
    NPU runs blocks `[k,180)` + decode. This is the number the cut is allowed to use.
-4. `python phase2_profile/solve_cut.py --Tg … --Tn … --Tv …` → commit the measured `k_b*`.
-5. Phase 1 (quantiser + Gate 1) is still outstanding and needs no phone — it can run in parallel
+6. `python phase2_profile/solve_cut.py --Tg … --Tn … --Tv …` → commit the measured `k_b*`.
+7. Phase 1 (quantiser + Gate 1) is still outstanding and needs no phone — it can run in parallel
    or while the phone cools: `docs/05_phase_plans.md`.
-6. Phase 3 executors, Phase 4 tables, report.
+8. Phase 3 executors, Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
 
@@ -75,6 +91,19 @@ the cut must come from a co-run measurement.
 - **32 int accumulators maximum** per thread; 64 spills (112–144 B/thread) and costs 4.5×.
 - Predicate the epilogue — a `break` in an unrolled loop spills the accumulators.
 - `arm_dot_acc` is a real SDOT; measured ceiling **1.77 TOPS**.
+
+NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
+
+- **A model needs `identifyInputsAndOutputs`.** Operands + `addOperation` alone compile to
+  `model_finish → BAD_DATA`. That was the first hour of the `T_N` harness.
+- **`getSupportedOperationsForDevices` requires a FINISHED model** — called before
+  `model_finish` it returns `BAD_STATE` and tells you nothing.
+- **A 10-op chained block graph reboots the phone** inside `Compilation_finish` (uptime resets).
+  It validates and reports full support first, so validation is not a viability test.
+- **`ffn.down` (K=8960) never finishes compiling** → `DEAD_OBJECT` after ~62 s, reproducible fresh.
+- **`FULLY_CONNECTED` rejects `TENSOR_QUANT8_SYMM_PER_CHANNEL`** (`addOperation` → `BAD_DATA(4)`).
+- `getDuration(DURATION_ON_HARDWARE)` reports ~6 µs for a 0.9 GMAC GEMM → unusable; time the
+  synchronous `execute`.
 
 ## Definition of done for the course project
 

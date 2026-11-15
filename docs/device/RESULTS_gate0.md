@@ -115,9 +115,15 @@ Kernel engineering, not hardware, decides this — measure it before any cut cla
    validator says `NN_RET_CHECK failed (Validation.cpp:854): !subgraph.operations.empty()`.
    **Read `adb logcat` — the NNAPI manager prints the exact failing check**; guessing wastes runs.
 3. **`TENSOR_QUANT8_SYMM` is not accepted by FC.** Signed int8 is
-   `ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED` with `zeroPoint = 0`. Per-output-column scales use
-   `ANEURALNETWORKS_TENSOR_QUANT8_SYMM_PER_CHANNEL` (`channelDim = 0`, operand `scale = 0`, scales via
-   `setOperandSymmPerChannelQuantParams`) — the exact analogue of the paper's per-column scale vector.
+   `ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED` with `zeroPoint = 0`.
+   ⚠️ **CORRECTED 2026-11-15 (this line used to claim the opposite):** the per-output-column form
+   (`ANEURALNETWORKS_TENSOR_QUANT8_SYMM_PER_CHANNEL`, `channelDim = 0`, operand `scale = 0`, scales
+   via `setOperandSymmPerChannelQuantParams`) is **REJECTED by FULLY_CONNECTED** — `addOperation`
+   returns `BAD_DATA (4)` on the *first* op of a one-op model, so it is structural, not a size
+   effect. Every FC sweep in this document passed `per_channel = 0`, so the per-column path was
+   never actually measured; the claim above was inferred from the header and is false.
+   Evidence: `docs/device/RESULTS_npu_tn.md` §2, `docs/device/npu_tn_20261115_153311.json`.
+   Consequence: per-tensor weight scales are the only compilable FC quantisation on this HAL.
 4. **Weights must be a constant operand** via `setOperandValueFromMemory` from an `ANeuralNetworksMemory`
    (file-backed or AHB-backed both work). Passing weights as a plain model *input* does not validate.
    Reusing one `ANeuralNetworksExecution` for a second `compute()` returns `BAD_STATE` — create a

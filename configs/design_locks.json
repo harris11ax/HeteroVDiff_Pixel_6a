@@ -132,8 +132,11 @@
     "T_G_co_run_s_per_block": null,
     "T_N_s_per_block": null,
     "T_V_s_per_chunk": null,
-    "status": "T_G solo measured (0.1618 s/block, Mali 64x64x32 tile 8x4); T_N, T_V, co-run T_G = TBD (blocked: token-tiled NPU block graph and VAE decode path not built)",
-    "note": "must be measured with both engines co-running, at the target resolution and thermal state; report the solo number as a kernel rate only"
+    "status": "T_G solo measured (0.1618 s/block, Mali 64x64x32 tile 8x4); T_N = TBD (blocked: 9 of 10 block GEMMs measured on the TPU, but ffn.down (K=8960) has no compilable graph - DEAD_OBJECT after ~62 s - and both timed runs started hot); T_V, co-run T_G = TBD",
+    "note": "must be measured with both engines co-running, at the target resolution and thermal state; report the solo number as a kernel rate only",
+    "T_N_partial_9of10_s_per_block": 0.4112,
+    "T_N_partial_note": "measured sum of 9/10 GEMMs at M=384 x 4 token tiles = 70.3% of block MACs, HOT-STARTED (TPU 60-67 C, gate wanted <= 30.3 C) -> lower bound only, not table-grade; see docs/device/RESULTS_npu_tn.md",
+    "T_N_over_T_G_lower_bound": 2.54
   },
   "cut": {
     "formula": "period(k_b) = max(k_b*T_G, (B-k_b)*T_N + T_V); k* = (B*T_N + T_V)/(T_N + T_G)",
@@ -215,7 +218,14 @@
   "npu_constraints": {
     "graph_token_ceiling": 384,
     "tiles_at_preset_a": 4,
-    "graph_shape": "one graph per (block, token-tile) candidate; whole-block graphs untested"
+    "graph_shape": "one graph per (block, token-tile); whole-block graphs validated and were SUPPORTED by google-edgetpu but Compilation_finish REBOOTED THE DEVICE (2026-11-15) -> one graph per GEMM is the only viable path",
+    "weight_scales": "per-tensor only: TENSOR_QUANT8_SYMM_PER_CHANNEL is rejected by FULLY_CONNECTED with addOperation BAD_DATA(4), so the per-output-column scheme cannot be expressed on the NPU stage; decision pending (see docs/device/RESULTS_npu_tn.md section 2)",
+    "uncompilable_shape": "FC with K=8960 (ffn.down) -> DEAD_OBJECT after ~62 s compile, reproduced in a fresh process; chunked-K + ADD or Mali is the untested workaround",
+    "measured_per_gemm_ms_per_tile_at_M384": {
+      "attn_1536x1536": 8.02,
+      "ffn_up_1536x8960": 36.74
+    },
+    "evidence": "docs/device/RESULTS_npu_tn.md + docs/device/npu_tn_20261115_153652.json"
   },
   "mali_int8_gemm": {
     "_comment": "Measured on the device 2026-11-15. Evidence: docs/device/RESULTS_gemm_mali.md + docs/device/gemm_mali_20261115_152103.json",
