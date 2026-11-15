@@ -15,6 +15,14 @@
 //   single — 10 separate one-op models (the fallback: 40 dispatches/block).
 //   support— build + validate the model, dump the per-op Edge-TPU support vector. No
 //            compile, so it cannot take the HAL down.
+//   down2 / down4 — the `ffn.down` workaround: `ffn.down` (N=1536, K=8960) does not compile
+//            on this HAL at all (DEAD_OBJECT after ~62 s / OP_FAILED after 47 s, both
+//            reproduced fresh). Split the K dimension into 2 x 4480 or 4 x 2240 FCs and
+//            accumulate with ANEURALNETWORKS_ADD. Same MAC count, same output shape; the
+//            extra cost is one ADD per extra chunk. Weights for the split layout come from
+//            a separate chunk-major blob (the row-major [N_out,K] blob cannot be sliced
+//            along K without a re-layout) — synthetic LCG like the main blob, since the
+//            real INT8 artifact does not exist yet. Pass iters=0 for a compile-only probe.
 //
 // Weights are a CONSTANT operand served from ONE file-mapped INT8 blob
 // (/data/local/tmp/hv_block_int8.bin, 46,399,488 B = the block's 10 base weight
@@ -48,6 +56,12 @@
 #include <vector>
 
 static const char* W_PATH = "/data/local/tmp/hv_block_int8.bin";
+// Chunk-major copy of the same 13,762,560 B of `ffn.down` weights, laid out as
+// `nchunks` contiguous [1536, 8960/nchunks] matrices so each chunk is a legal
+// constant operand. Synthetic LCG fill, same as W_PATH.
+static const char* W_DOWN_PATH = "/data/local/tmp/hv_down_chunks.bin";
+static const int DOWN_N = 1536;
+static const int DOWN_K = 8960;
 
 // The Preset-A DiT block's 10 base GEMMs, in execution order. Layout is row-major
 // [N_out, K] INT8 — the layout both arm_dot (Mali) and NNAPI FC want.
@@ -125,6 +139,40 @@ static int64_t ensure_weights(const char** why) {
     munmap(p, (size_t)W_BYTES);
     close(fd);
     P("WFILE|path=%s|bytes=%lld|fill=lcg", W_PATH, (long long)W_BYTES);
+    return 0;
+}
+
+// The chunk-major `ffn.down` blob. Same total bytes as the down region of W_PATH
+// (DOWN_N * DOWN_K), different order: chunk 0's full [1536, K/nchunks] matrix,
+// then chunk 1's, etc. Plus a filler block zeroed first so chunk LENGTHS are the
+// thing that varies — nothing here is real weight data (LCG fill).
+static int64_t ensure_down_blob(int nchunks, const char** path_out, const char** why) {
+    static std::string dyn[2];
+    int idx = (nchunks == 4) ? 1 : 0;
+    dyn[idx] = "/data/local/tmp/hv_down_chunk";
+    dyn[idx] += std::to_string(nchunks);
+    dyn[idx] += ".bin";
+    const char* path = dyn[idx].c_str();
+    *path_out = path;
+    const int64_t bytes = (int64_t)DOWN_N * (int64_t)DOWN_K;
+
+    struct stat st;
+    if (stat(path, &st) == 0 && st.st_size == bytes) return 0;
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { *why = "down_open"; return -1; }
+    if (ftruncate(fd, (off_t)bytes) != 0) { *why = "down_trunc"; close(fd); return -1; }
+    void* p = mmap(nullptr, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) { *why = "down_mmap"; close(fd); return -1; }
+    int8_t* q = (int8_t*)p;
+    uint32_t x = 0x9E3779B9u;
+    for (int64_t i = 0; i < bytes; ++i) {
+        x = x * 1664525u + 1013904223u;
+        q[i] = (int8_t)((x >> 24) & 0xFF);
+    }
+    msync(p, (size_t)bytes, MS_SYNC);
+    munmap(p, (size_t)bytes);
+    close(fd);
+    P("WFILE|path=%s|bytes=%lld|fill=lcg|chunks=%d", path, (long long)bytes, nchunks);
     return 0;
 }
 
@@ -228,6 +276,187 @@ static int build_model(ANeuralNetworksMemory* wmem, int M, const Gemm* gems, int
     return 0;
 }
 
+// ANEURALNETWORKS_ADD for the chunked-K down projection. On this HAL's quant8
+// path all three tensors must share scale/zeroPoint (per-tensor SA), which is
+// why the chunk outputs are requantised to SA between adds — acceptable here
+// because this measures latency; the accuracy consequence belongs to Gate 1.
+static int add_add(Holder& h, int M, int N, uint32_t a, uint32_t b, uint32_t* out,
+                   const char** why) {
+    uint32_t d[2] = {(uint32_t)M, (uint32_t)N};
+    ANeuralNetworksOperandType t = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 2, d, SA, 0};
+    ANeuralNetworksOperandType tAct = {ANEURALNETWORKS_INT32, 0, nullptr, 0.0f, 0};
+    uint32_t iact, io;
+    // Both inputs are existing operands (a, b) — do NOT allocate a fresh
+    // operand for the second input: an operand that no op consumes and no value
+    // backs is "never written" and fails model_finish with BAD_DATA.
+    if (add_operand(h, &tAct, &iact, why)) return -1;
+    if (add_operand(h, &t, &io, why)) return -1;
+    int rc = ANeuralNetworksModel_setOperandValue(h.m, iact, &h.fused, sizeof(h.fused));
+    if (rc) { P("FATAL|add_setAct|rc=%d(%s)", rc, rcs(rc)); *why = "add_act"; return -1; }
+    uint32_t op_in[3] = {a, b, iact};
+    uint32_t op_out[1] = {io};
+    rc = ANeuralNetworksModel_addOperation(h.m, ANEURALNETWORKS_ADD, 3, op_in, 1, op_out);
+    if (rc) { P("FATAL|addOperation|ADD|rc=%d(%s)", rc, rcs(rc)); *why = "add_op"; return -1; }
+    *out = io;
+    return 0;
+}
+
+// nchunks x FC(1536, 8960/nchunks) accumulated by ADD. The activation is the
+// same [M, 8960/nchunks] tile for every chunk (the harness feeds ones; a real
+// pipeline hands each chunk its slice of the 8960-wide activation).
+static int build_down(ANeuralNetworksMemory* wmem, int M, int nchunks, Holder& h,
+                      uint32_t* in_id, uint32_t* out_id, const char** why) {
+    int rc = ANeuralNetworksModel_create(&h.m);
+    if (rc) { *why = "model_create"; return -rc; }
+    const int Kc = DOWN_K / nchunks;
+    uint32_t dA[2] = {(uint32_t)M, (uint32_t)Kc};
+    ANeuralNetworksOperandType tA = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 2, dA, SA, 0};
+    uint32_t ia;
+    if (add_operand(h, &tA, &ia, why)) return -1;
+    *in_id = ia;
+
+    uint32_t acc = 0;
+    for (int c = 0; c < nchunks; ++c) {
+        Gemm g = {DOWN_N, Kc, (int64_t)c * (int64_t)DOWN_N * (int64_t)Kc, "ffn.down"};
+        uint32_t o;
+        if (add_fc(h, wmem, M, g, ia, &o, why)) return -1;
+        if (c == 0) { acc = o; continue; }
+        uint32_t no;
+        if (add_add(h, M, DOWN_N, acc, o, &no, why)) return -1;
+        acc = no;
+    }
+    *out_id = acc;
+
+    uint32_t ins[1] = {ia};
+    uint32_t outs[1] = {acc};
+    rc = ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs);
+    if (rc) { P("FATAL|identifyIO|rc=%d(%s)", rc, rcs(rc)); *why = "identify_io"; return -rc; }
+    return 0;
+}
+
+// mode=downsep: the only chunked-K shape that fits the compiler's K ceiling.
+// K=8960 does not compile, and neither does K=1792 (measured: K<=1664 compiles
+// in ~0.5 s, K=1792 fails OP_FAILED after 48.7 s), so the down projection is
+// split into DOWN_K/Kc chunks of Kc=1280 — and each chunk is compiled as its OWN
+// one-op model, because a multi-FC graph of this size is exactly what rebooted
+// the phone in Compilation_finish during the chain experiment.
+static int run_downsep(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
+                       int M, int nchunks, int tiles, int iters) {
+    const int Kc = DOWN_K / nchunks;
+    const char* why = "";
+
+    std::vector<ANeuralNetworksCompilation*> fc(nchunks, nullptr);
+    std::vector<ANeuralNetworksModel*> fcm(nchunks, nullptr);
+    double compile_fc_ms = 0;
+    for (int c = 0; c < nchunks; ++c) {
+        Holder h; uint32_t in_id = 0, out_id = 0;
+        if (ANeuralNetworksModel_create(&h.m)) { P("FATAL|downsep_model|%d", c); return 5; }
+        uint32_t dA[2] = {(uint32_t)M, (uint32_t)Kc};
+        ANeuralNetworksOperandType tA = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 2, dA, SA, 0};
+        add_operand(h, &tA, &in_id, &why);
+        Gemm g = {DOWN_N, Kc, (int64_t)c * (int64_t)DOWN_N * (int64_t)Kc, "ffn.down"};
+        if (add_fc(h, wmem, M, g, in_id, &out_id, &why)) { P("FATAL|downsep_fc|%d", c); return 5; }
+        uint32_t ins[1] = {in_id}, outs[1] = {out_id};
+        ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs);
+        if (ANeuralNetworksModel_finish(h.m)) { P("FATAL|downsep_finish|%d", c); return 6; }
+        ANeuralNetworksCompilation* comp = nullptr;
+        int64_t c0 = now_ns();
+        int rc = ANeuralNetworksCompilation_createForDevices(h.m, &tpu, 1, &comp);
+        if (rc) { P("FATAL|downsep_comp_create|%d|rc=%d(%s)", c, rc, rcs(rc)); return 7; }
+        ANeuralNetworksCompilation_setPreference(comp, ANEURALNETWORKS_PREFER_SUSTAINED_SPEED);
+        rc = ANeuralNetworksCompilation_finish(comp);
+        double cms = (now_ns() - c0) / 1e6;
+        compile_fc_ms += cms;
+        P("COMPILE|mode=downsep|c=%d|K=%d|ms=%.1f|rc=%d(%s)", c, Kc, cms, rc, rcs(rc));
+        if (rc) { P("FATAL|downsep_compile|%d|rc=%d(%s)", c, rc, rcs(rc)); return 7; }
+        fc[c] = comp; fcm[c] = h.m;
+    }
+
+    // One ADD compilation, reused for every accumulate (shapes are identical).
+    Holder ha; uint32_t a0 = 0, a1 = 0, ao = 0;
+    if (ANeuralNetworksModel_create(&ha.m)) { P("FATAL|addsep_model"); return 5; }
+    uint32_t dO[2] = {(uint32_t)M, (uint32_t)DOWN_N};
+    ANeuralNetworksOperandType tO = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 2, dO, SA, 0};
+    add_operand(ha, &tO, &a0, &why);
+    add_operand(ha, &tO, &a1, &why);
+    if (add_add(ha, M, DOWN_N, a0, a1, &ao, &why)) { P("FATAL|addsep_build|%s", why); return 5; }
+    uint32_t ains[2] = {a0, a1}, aouts[1] = {ao};
+    ANeuralNetworksModel_identifyInputsAndOutputs(ha.m, 2, ains, 1, aouts);
+    if (ANeuralNetworksModel_finish(ha.m)) { P("FATAL|addsep_finish"); return 6; }
+    ANeuralNetworksCompilation* addc = nullptr;
+    int64_t a0ns = now_ns();
+    int rc = ANeuralNetworksCompilation_createForDevices(ha.m, &tpu, 1, &addc);
+    if (rc) { P("FATAL|addsep_comp_create|rc=%d(%s)", rc, rcs(rc)); return 7; }
+    ANeuralNetworksCompilation_setPreference(addc, ANEURALNETWORKS_PREFER_SUSTAINED_SPEED);
+    rc = ANeuralNetworksCompilation_finish(addc);
+    double compile_add_ms = (now_ns() - a0ns) / 1e6;
+    P("COMPILE|mode=downsep|ADD|ms=%.1f|rc=%d(%s)", compile_add_ms, rc, rcs(rc));
+    if (rc) { P("FATAL|addsep_compile|rc=%d(%s)", rc, rcs(rc)); return 7; }
+
+    if (iters <= 0) {
+        P("SUMMARY|mode=downsep|M=%d|chunks=%d|Kc=%d|compile_ms=%.1f|probe_only=1",
+          M, nchunks, Kc, compile_fc_ms + compile_add_ms);
+        P("DONE");
+        return 0;
+    }
+
+    const size_t asz = (size_t)M * (size_t)Kc;
+    const size_t osz = (size_t)M * (size_t)DOWN_N;
+    std::vector<int8_t> A(asz, 1);
+    std::vector<std::vector<int8_t>> O(nchunks, std::vector<int8_t>(osz, 0));
+    std::vector<int8_t> bufA(osz, 0), bufB(osz, 0);
+
+    std::vector<double> tile_ms;
+    for (int it = 0; it < iters; ++it) {
+        for (int t = 0; t < tiles; ++t) {
+            int64_t t0 = now_ns();
+            // 7 chunk FCs + 6 ADDs, each a separate dispatch, exactly the shape
+            // the single-mode fallback already pays for.
+            for (int c = 0; c < nchunks; ++c) {
+                ANeuralNetworksExecution* ex = nullptr;
+                if (ANeuralNetworksExecution_create(fc[c], &ex)) { P("FATAL|downsep_exec|%d", c); return 8; }
+                ANeuralNetworksExecution_setInput(ex, 0, nullptr, A.data(), asz);
+                ANeuralNetworksExecution_setOutput(ex, 0, nullptr, O[c].data(), osz);
+                int erc = ANeuralNetworksExecution_compute(ex);
+                ANeuralNetworksExecution_free(ex);
+                if (erc) { P("FATAL|downsep_compute_fc|c=%d|tile=%d|rc=%d(%s)", c, t, erc, rcs(erc)); return 8; }
+            }
+            int8_t* prev = O[0].data();
+            for (int c = 1; c < nchunks; ++c) {
+                int8_t* dst = (c & 1) ? bufA.data() : bufB.data();
+                ANeuralNetworksExecution* ex = nullptr;
+                if (ANeuralNetworksExecution_create(addc, &ex)) { P("FATAL|downsep_add_exec"); return 8; }
+                ANeuralNetworksExecution_setInput(ex, 0, nullptr, prev, osz);
+                ANeuralNetworksExecution_setInput(ex, 1, nullptr, O[c].data(), osz);
+                ANeuralNetworksExecution_setOutput(ex, 0, nullptr, dst, osz);
+                int erc = ANeuralNetworksExecution_compute(ex);
+                ANeuralNetworksExecution_free(ex);
+                if (erc) { P("FATAL|downsep_compute_add|c=%d|tile=%d|rc=%d(%s)", c, t, erc, rcs(erc)); return 8; }
+                prev = dst;
+            }
+            int64_t t1 = now_ns();
+            tile_ms.push_back((t1 - t0) / 1e6);
+            if (it == 0)
+                P("TILE|downsep|tile=%d|ms=%.3f|out0=%d", t, (t1 - t0) / 1e6, (int)prev[0]);
+        }
+    }
+
+    double sum = 0;
+    for (double v : tile_ms) sum += v;
+    double per_tile = sum / (double)tile_ms.size();
+    double block_s = per_tile * tiles / 1000.0;
+    double gmacs = (double)tiles * (double)M * (double)DOWN_N * (double)DOWN_K;
+    P("OP|ffn.down|chunked_sep=%d|N=%d|K=%d|compile_ms=%.1f|ms_per_tile=%.3f|per_block_s=%.4f|gops=%.1f",
+      nchunks, DOWN_N, DOWN_K, compile_fc_ms + compile_add_ms, per_tile, block_s,
+      2.0 * gmacs / block_s / 1e9);
+    P("SUMMARY|mode=downsep|M=%d|tiles=%d|iters=%d|chunks=%d|Kc=%d|compile_ms=%.1f|"
+      "ms_per_tile=%.3f|per_block_s=%.4f|gops=%.1f|samples=%zu",
+      M, tiles, iters, nchunks, Kc, compile_fc_ms + compile_add_ms, per_tile, block_s,
+      2.0 * gmacs / block_s / 1e9, tile_ms.size());
+    P("DONE");
+    return 0;
+}
+
 static ANeuralNetworksDevice* find_tpu() {
     uint32_t n = 0;
     if (ANeuralNetworks_getDeviceCount(&n) != 0) return nullptr;
@@ -304,16 +533,233 @@ int main(int argc, char** argv) {
     }
 
     const char* why = "";
-    if (ensure_weights(&why)) { P("FATAL|weights|%s", why); P("DONE"); return 2; }
+    // `down2` / `down4` need the chunk-major blob; every other mode uses the
+    // block blob. Both are the same page-aligned size maths (checked below).
+    const char* wpath = W_PATH;
+    int nchunks = 0;
+    int64_t wbytes = W_BYTES;
+    if (strncmp(mode, "down", 4) == 0) {
+        nchunks = (strcmp(mode, "downsep") == 0) ? 7 : atoi(mode + 4);
+        if (nchunks != 2 && nchunks != 4 && nchunks != 7) {
+            P("FATAL|bad_chunk_count|%s|want=down2|down4|downsep", mode); P("DONE"); return 2; }
+        if (ensure_down_blob(nchunks, &wpath, &why)) { P("FATAL|down_weights|%s", why); P("DONE"); return 2; }
+        wbytes = (int64_t)DOWN_N * (int64_t)DOWN_K;
+    } else if (ensure_weights(&why)) { P("FATAL|weights|%s", why); P("DONE"); return 2; }
 
     ANeuralNetworksMemory* wmem = nullptr;
-    int wfd = open(W_PATH, O_RDWR);
-    if (wfd < 0) { P("FATAL|wfile_reopen"); P("DONE"); return 2; }
-    int rc = ANeuralNetworksMemory_createFromFd((size_t)W_BYTES, PROT_READ | PROT_WRITE, wfd, 0, &wmem);
+    int wfd = open(wpath, O_RDWR);
+    if (wfd < 0) { P("FATAL|wfile_reopen|%s", wpath); P("DONE"); return 2; }
+    int rc = ANeuralNetworksMemory_createFromFd((size_t)wbytes, PROT_READ | PROT_WRITE, wfd, 0, &wmem);
     if (rc) { P("FATAL|createFromFd|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 2; }
 
     ANeuralNetworksDevice* tpu = find_tpu();
     if (!tpu) { P("FATAL|no_edgetpu_device"); P("DONE"); return 3; }
+
+    // mode=ksweep: bracket the K dimension the model validator accepts for a
+    // single FC, and test whether ADD is accepted at all (signed vs unsigned
+    // quant8). Validation only — no compile, so this cannot take the HAL down.
+    if (strcmp(mode, "ksweep") == 0) {
+        const char* dwhy = "";
+        const int Ks[7] = {1536, 1792, 2240, 3072, 3584, 4480, 8960};
+        for (int ki = 0; ki < 7; ++ki) {
+            const int Kc = Ks[ki];
+            if ((int64_t)DOWN_N * Kc > W_BYTES) { P("DIAG|fc_k%d|skipped_blob_too_small", Kc); continue; }
+            Holder h; uint32_t in_id = 0, out_id = 0;
+            int brc = ANeuralNetworksModel_create(&h.m);
+            if (!brc) {
+                uint32_t dA[2] = {(uint32_t)M, (uint32_t)Kc};
+                ANeuralNetworksOperandType tA = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 2, dA, SA, 0};
+                add_operand(h, &tA, &in_id, &dwhy);
+                Gemm g = {DOWN_N, Kc, 0, "downprobe"};
+                brc = add_fc(h, wmem, M, g, in_id, &out_id, &dwhy);
+                if (!brc) {
+                    uint32_t ins[1] = {in_id}, outs[1] = {out_id};
+                    ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs);
+                }
+            }
+            int frc = brc ? -brc : ANeuralNetworksModel_finish(h.m);
+            P("DIAG|fc_k%d|build_rc=%d|model_finish_rc=%d(%s)", Kc, brc, frc, rcs(frc));
+            ANeuralNetworksModel_free(h.m);
+        }
+        // ADD, signed vs unsigned quant8, [M, 1536]
+        for (int uns = 0; uns < 2; ++uns) {
+            Holder h; uint32_t o = 0;
+            if (ANeuralNetworksModel_create(&h.m)) { P("DIAG|add_%s|create_fail", uns ? "u8" : "s8"); continue; }
+            uint32_t d[2] = {(uint32_t)M, (uint32_t)DOWN_N};
+            ANeuralNetworksOperandType t = {uns ? ANEURALNETWORKS_TENSOR_QUANT8_ASYMM
+                                               : ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED,
+                                            2, d, SA, 0};
+            ANeuralNetworksOperandType tAct = {ANEURALNETWORKS_INT32, 0, nullptr, 0.0f, 0};
+            uint32_t i1 = h.next, i2, iact;
+            add_operand(h, &t, &i1, &dwhy);
+            add_operand(h, &t, &i2, &dwhy);
+            add_operand(h, &tAct, &iact, &dwhy);
+            add_operand(h, &t, &o, &dwhy);
+            ANeuralNetworksModel_setOperandValue(h.m, iact, &h.fused, sizeof(h.fused));
+            uint32_t op_in[3] = {i1, i2, iact}, op_out[1] = {o};
+            int arc = ANeuralNetworksModel_addOperation(h.m, ANEURALNETWORKS_ADD, 3, op_in, 1, op_out);
+            uint32_t ins[2] = {i1, i2}, outs[1] = {o};
+            ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 2, ins, 1, outs);
+            int frc = ANeuralNetworksModel_finish(h.m);
+            P("DIAG|add_%s|addOperation_rc=%d|model_finish_rc=%d(%s)", uns ? "u8" : "s8", arc, frc, rcs(frc));
+            ANeuralNetworksModel_free(h.m);
+        }
+        P("DONE");
+        return 0;
+    }
+
+    // mode=kcompile: compile ONE FC of shape [N=1536, K=only] (K from argv[6]),
+    // to bracket the largest K this compiler will accept. Fresh process per K.
+    if (strcmp(mode, "kcompile") == 0) {
+        const char* dwhy = "";
+        const int Kc = (only > 0) ? only : 2240;
+        if ((int64_t)DOWN_N * Kc > W_BYTES) { P("FATAL|k_too_big_for_blob|K=%d", Kc); P("DONE"); return 2; }
+        Holder h; uint32_t in_id = 0, out_id = 0;
+        int brc = ANeuralNetworksModel_create(&h.m);
+        if (!brc) {
+            uint32_t dA[2] = {(uint32_t)M, (uint32_t)Kc};
+            ANeuralNetworksOperandType tA = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 2, dA, SA, 0};
+            add_operand(h, &tA, &in_id, &dwhy);
+            Gemm g = {DOWN_N, Kc, 0, "kc"};
+            brc = add_fc(h, wmem, M, g, in_id, &out_id, &dwhy);
+            if (!brc) { uint32_t ins[1] = {in_id}, outs[1] = {out_id};
+                        ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs); }
+        }
+        int frc = brc ? -brc : ANeuralNetworksModel_finish(h.m);
+        P("MODEL_FINISH|mode=kcompile|K=%d|build_rc=%d|rc=%d(%s)", Kc, brc, frc, rcs(frc));
+        if (frc) { P("DONE"); return 6; }
+        ANeuralNetworksCompilation* comp = nullptr;
+        int64_t c0 = now_ns();
+        rc = ANeuralNetworksCompilation_createForDevices(h.m, &tpu, 1, &comp);
+        if (rc) { P("FATAL|comp_create|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 7; }
+        ANeuralNetworksCompilation_setPreference(comp, ANEURALNETWORKS_PREFER_SUSTAINED_SPEED);
+        rc = ANeuralNetworksCompilation_finish(comp);
+        P("COMPILE|mode=kcompile|K=%d|ms=%.1f|rc=%d(%s)", Kc, (now_ns() - c0) / 1e6, rc, rcs(rc));
+        P("DONE");
+        return 0;
+    }
+
+    // ------------------------------------------- chunked-K ffn.down (the fork)
+    // mode=diag: isolate which construct the combination rejects (validation only).
+    // G2: two FCs from SEPARATE inputs + ADD   G3: two FCs chained   G4: fan-out
+    // (one input feeding two FCs, no ADD)   G5: build_down (fan-out + ADD).
+    if (strcmp(mode, "diag") == 0) {
+        if (nchunks == 0) nchunks = 2;
+        const char* dwhy = "";
+        const int Kc = DOWN_K / nchunks;
+        auto mk_in = [&](Holder& h, uint32_t* id) {
+            uint32_t dA[2] = {(uint32_t)M, (uint32_t)Kc};
+            ANeuralNetworksOperandType tA = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 2, dA, SA, 0};
+            return add_operand(h, &tA, id, &dwhy);
+        };
+        Gemm g0 = {DOWN_N, Kc, 0, "ffn.down_c0"};
+        Gemm g1 = {DOWN_N, Kc, (int64_t)DOWN_N * Kc, "ffn.down_c1"};
+
+        {   // G2: two separate inputs, one FC each, then ADD
+            Holder h; uint32_t a0 = 0, a1 = 0, o0 = 0, o1 = 0, out = 0;
+            int brc = ANeuralNetworksModel_create(&h.m);
+            if (!brc) brc = mk_in(h, &a0);
+            if (!brc) brc = mk_in(h, &a1);
+            if (!brc) brc = add_fc(h, wmem, M, g0, a0, &o0, &dwhy);
+            if (!brc) brc = add_fc(h, wmem, M, g1, a1, &o1, &dwhy);
+            if (!brc) brc = add_add(h, M, DOWN_N, o0, o1, &out, &dwhy);
+            if (!brc) { uint32_t ins[2] = {a0, a1}, outs[1] = {out};
+                        ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 2, ins, 1, outs); }
+            int frc = brc ? -brc : ANeuralNetworksModel_finish(h.m);
+            P("DIAG|G2_two_in_fc_add|build_rc=%d|model_finish_rc=%d(%s)", brc, frc, rcs(frc));
+            ANeuralNetworksModel_free(h.m);
+        }
+        {   // G3: two FCs chained (Kc then Kc again) — no ADD at all
+            Holder h; uint32_t a0 = 0, mid = 0, out = 0;
+            int brc = ANeuralNetworksModel_create(&h.m);
+            if (!brc) brc = mk_in(h, &a0);
+            if (!brc) brc = add_fc(h, wmem, M, g0, a0, &mid, &dwhy);
+            if (!brc) brc = add_fc(h, wmem, M, g1, mid, &out, &dwhy);
+            if (!brc) { uint32_t ins[1] = {a0}, outs[1] = {out};
+                        ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs); }
+            int frc = brc ? -brc : ANeuralNetworksModel_finish(h.m);
+            P("DIAG|G3_two_fc_chain|build_rc=%d|model_finish_rc=%d(%s)", brc, frc, rcs(frc));
+            ANeuralNetworksModel_free(h.m);
+        }
+        {   // G4: one input fanning out to two FCs, model output = the second only
+            Holder h; uint32_t a0 = 0, o0 = 0, o1 = 0;
+            int brc = ANeuralNetworksModel_create(&h.m);
+            if (!brc) brc = mk_in(h, &a0);
+            if (!brc) brc = add_fc(h, wmem, M, g0, a0, &o0, &dwhy);
+            if (!brc) brc = add_fc(h, wmem, M, g1, a0, &o1, &dwhy);
+            if (!brc) { uint32_t ins[1] = {a0}, outs[1] = {o1};
+                        ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs); }
+            int frc = brc ? -brc : ANeuralNetworksModel_finish(h.m);
+            P("DIAG|G4_fanout_two_fc|build_rc=%d|model_finish_rc=%d(%s)", brc, frc, rcs(frc));
+            ANeuralNetworksModel_free(h.m);
+        }
+        {   // G5: build_down exactly as the down2/down4 modes build it
+            Holder h; uint32_t in_id = 0, out_id = 0;
+            int brc = build_down(wmem, M, nchunks, h, &in_id, &out_id, &dwhy);
+            int frc = brc ? -brc : ANeuralNetworksModel_finish(h.m);
+            P("DIAG|G5_build_down|build_rc=%d|model_finish_rc=%d(%s)", brc, frc, rcs(frc));
+            ANeuralNetworksModel_free(h.m);
+        }
+        P("DONE");
+        return 0;
+    }
+
+    if (nchunks) {
+        if (strcmp(mode, "downsep") == 0)
+            return run_downsep(tpu, wmem, M, nchunks, tiles, iters);
+        Holder h; uint32_t in_id = 0, out_id = 0; why = "";
+        if (build_down(wmem, M, nchunks, h, &in_id, &out_id, &why)) {
+            P("FATAL|build_down|chunks=%d|why=%s", nchunks, why); P("DONE"); return 5; }
+        rc = ANeuralNetworksModel_finish(h.m);
+        if (rc) { P("FATAL|model_finish_down|chunks=%d|rc=%d(%s)", nchunks, rc, rcs(rc));
+                  P("DONE"); return 6; }
+        P("MODEL_FINISH|mode=%s|nops=%d|M=%d|rc=%d(%s)", mode, 2 * nchunks - 1, M, rc, rcs(rc));
+        bool sup[16] = {false};
+        int src = ANeuralNetworksModel_getSupportedOperationsForDevices(h.m, &tpu, 1, sup);
+        P("SUPPORT|mode=%s|nops=%d|rc=%d(%s)", mode, 2 * nchunks - 1, src, rcs(src));
+        if (src == 0) {
+            for (int i = 0; i < 2 * nchunks - 1; ++i)
+                P("SUP_OP|pc=0|%s|%d", (i < nchunks) ? "FC" : "ADD", sup[i] ? 1 : 0);
+        }
+
+        ANeuralNetworksCompilation* comp = nullptr;
+        int64_t c0 = now_ns();
+        rc = ANeuralNetworksCompilation_createForDevices(h.m, &tpu, 1, &comp);
+        if (rc) { P("FATAL|comp_create_down|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 7; }
+        ANeuralNetworksCompilation_setPreference(comp, ANEURALNETWORKS_PREFER_SUSTAINED_SPEED);
+        rc = ANeuralNetworksCompilation_finish(comp);
+        double compile_ms = (now_ns() - c0) / 1e6;
+        P("COMPILE|mode=%s|Kc=%d|ms=%.1f|rc=%d(%s)", mode, DOWN_K / nchunks, compile_ms, rc, rcs(rc));
+        if (rc) { P("FATAL|comp_finish_down|chunks=%d|ms=%.1f|rc=%d(%s)",
+                    nchunks, compile_ms, rc, rcs(rc)); P("DONE"); return 7; }
+        if (iters <= 0) {
+            // compile-only probe: answers "does this shape compile at all"
+            // without heating the device through a timed run.
+            P("SUMMARY|mode=%s|M=%d|compile_ms=%.1f|probe_only=1", mode, M, compile_ms);
+            ANeuralNetworksCompilation_free(comp); ANeuralNetworksModel_free(h.m);
+            P("DONE"); return 0;
+        }
+
+        std::vector<double> tm, hw;
+        if (time_tiles(comp, cfg, out_id, DOWN_N, DOWN_K / nchunks, &tm, &hw, mode, &why)) {
+            P("DONE"); return 8; }
+        ANeuralNetworksCompilation_free(comp);
+        ANeuralNetworksModel_free(h.m);
+
+        double sum = 0;
+        for (double v : tm) sum += v;
+        double per_tile = sum / (double)tm.size();
+        double block_s = per_tile * tiles / 1000.0;
+        double gmacs = (double)tiles * (double)M * (double)DOWN_N * (double)DOWN_K;
+        P("OP|ffn.down|chunked=%d|N=%d|K=%d|compile_ms=%.1f|ms_per_tile=%.3f|per_block_s=%.4f|gops=%.1f",
+          nchunks, DOWN_N, DOWN_K, compile_ms, per_tile, block_s, 2.0 * gmacs / block_s / 1e9);
+        P("SUMMARY|mode=%s|M=%d|tiles=%d|iters=%d|compile_ms=%.1f|ms_per_tile=%.3f|"
+          "per_block_s=%.4f|gops=%.1f|samples=%zu",
+          mode, M, tiles, iters, compile_ms, per_tile, block_s,
+          2.0 * gmacs / block_s / 1e9, tm.size());
+        P("DONE");
+        return 0;
+    }
 
     // ---------------------------------------------------------- support probe
     {

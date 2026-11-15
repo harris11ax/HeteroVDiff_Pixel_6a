@@ -158,10 +158,21 @@ def md_report(rec: dict) -> str:
             L.append("")
         for s in p["summary"]:
             L += ["| quantity | value |", "|---|---|"]
-            if s.get("mode") == "chain":
+            mode = s.get("mode")
+            if s.get("probe_only"):
+                L.append(f"| compile-only probe (`{mode}`, M={s.get('M')}) | **compiled OK in {s.get('compile_ms')} ms** |")
+                L.append("")
+                continue
+            if mode == "chain":
                 L.append(f"| compile (one 10-op graph) | {s.get('compile_ms')} ms |")
                 L.append(f"| compute per token tile (M=384) | **{s.get('ms_per_tile')} ms** |")
                 L.append(f"| **T_N per block** ({int(s.get('tiles', 0))} tiles) | **{s.get('per_block_s')} s** |")
+                L.append(f"| effective | **{s.get('gops')} GOPS** |")
+                L.append("")
+            elif str(mode).startswith("down"):
+                L.append(f"| compile (chunked-K graph) | {s.get('compile_ms')} ms |")
+                L.append(f"| compute per token tile (M={s.get('M')}) | **{s.get('ms_per_tile')} ms** |")
+                L.append(f"| **`ffn.down` per block** ({int(s.get('tiles', 0))} tiles) | **{s.get('per_block_s')} s** |")
                 L.append(f"| effective | **{s.get('gops')} GOPS** |")
                 L.append("")
             else:
@@ -187,7 +198,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--modes", default="support,chain",
-                    help="comma list of support|chain|single (one fresh process each)")
+                    help="comma list of support|chain|single|down2|down4 (one fresh process each). "
+                         "down2/down4 = chunked-K ffn.down workaround; with --iters 0 they are "
+                         "compile-only probes.")
     ap.add_argument("--tiles", type=int, default=4)
     ap.add_argument("--iters", type=int, default=3)
     ap.add_argument("--M", type=int, default=384)

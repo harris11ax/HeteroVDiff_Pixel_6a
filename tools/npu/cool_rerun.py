@@ -46,6 +46,10 @@ def main() -> int:
     ap.add_argument("--max-wait", type=float, default=3600, help="give up cooling after this many s")
     ap.add_argument("--poll", type=float, default=45, help="s between thermal samples while cooling")
     ap.add_argument("--tiles", type=int, default=4)
+    ap.add_argument("--iters", type=int, default=None,
+                    help="override the harness iteration count (default: 2 for single, 3 otherwise)")
+    ap.add_argument("--modes", default="single",
+                    help="harness modes to run once the gate passes (single|downsep|down2|...)")
     ap.add_argument("--M", type=int, default=384)
     args = ap.parse_args()
 
@@ -78,8 +82,10 @@ def main() -> int:
         return 3
 
     cmd = [sys.executable, str(REPO / "tools" / "npu" / "npu_host.py"),
-           "--modes", "single", "--pc", "0", "--tiles", str(args.tiles),
+           "--modes", args.modes, "--pc", "0", "--tiles", str(args.tiles),
            "--M", str(args.M), "--cooldown", f"{gate:.1f}", "--serial", serial]
+    if args.iters is not None:
+        cmd += ["--iters", str(args.iters)]
     stamp("RUN " + " ".join(cmd))
     rc = subprocess.call(cmd, cwd=str(REPO))
     stamp(f"HARNESS EXIT rc={rc}")
