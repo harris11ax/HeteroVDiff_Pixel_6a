@@ -457,6 +457,140 @@ static int run_downsep(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
     return 0;
 }
 
+// ------------------------------------------------- T_V: one CONV_2D op (tap)
+// The VAE decoder is a stack of causal 3-D convs and NNAPI has no CONV_3D. The
+// decomposition each kT tap becomes is a plain 2-D CONV_2D over the (h,w) plane
+// of one frame, accumulated into the output frame with ADD. So the unit of
+// measurement is one CONV_2D at the layer's real shape, exactly like the T_N
+// table's unit is one FULLY_CONNECTED.
+//
+// Filter layout for CONV_2D is [Cout, kH, kW, Cin] (OHWI), the transpose of the
+// checkpoint's [Cout, Cin, kT, kH, kW] slice — getting this backwards produces
+// a graph that runs and is numerically wrong, so it is filled explicitly here.
+struct ConvCfg { int N, H, W, Cin, Cout, k; };
+
+static int run_conv(ANeuralNetworksDevice* tpu, const ConvCfg& c, int tiles, int iters) {
+    const char* why = "";
+    // int64: a Preset-A decoder conv is ~97 GMAC per tap and overflows int32
+    const int64_t macs = (int64_t)c.N * c.H * c.W * c.Cout * c.Cin * c.k * c.k;
+
+    Holder h;
+    int rc = ANeuralNetworksModel_create(&h.m);
+    if (rc) { P("FATAL|conv_model_create|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 5; }
+
+    const uint32_t dI[4] = {(uint32_t)c.N, (uint32_t)c.H, (uint32_t)c.W, (uint32_t)c.Cin};
+    const uint32_t dF[4] = {(uint32_t)c.Cout, (uint32_t)c.k, (uint32_t)c.k, (uint32_t)c.Cin};
+    const uint32_t dB[1] = {(uint32_t)c.Cout};
+    const uint32_t dO[4] = {(uint32_t)c.N, (uint32_t)c.H, (uint32_t)c.W, (uint32_t)c.Cout};
+
+    ANeuralNetworksOperandType tI = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dI, SA, 0};
+    ANeuralNetworksOperandType tF = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dF, SW, 0};
+    ANeuralNetworksOperandType tB = {ANEURALNETWORKS_TENSOR_INT32, 1, dB, SA * SW, 0};
+    ANeuralNetworksOperandType tO = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dO, SA, 0};
+    ANeuralNetworksOperandType tS = {ANEURALNETWORKS_INT32, 0, nullptr, 0.0f, 0};
+
+    uint32_t iI, iF, iB, ipl, ipr, ipt, ipb, isw, ish, iact, iO;
+    if (add_operand(h, &tI, &iI, &why) || add_operand(h, &tF, &iF, &why) ||
+        add_operand(h, &tB, &iB, &why) || add_operand(h, &tS, &ipl, &why) ||
+        add_operand(h, &tS, &ipr, &why) || add_operand(h, &tS, &ipt, &why) ||
+        add_operand(h, &tS, &ipb, &why) || add_operand(h, &tS, &isw, &why) ||
+        add_operand(h, &tS, &ish, &why) || add_operand(h, &tS, &iact, &why) ||
+        add_operand(h, &tO, &iO, &why)) {
+        P("FATAL|conv_add_operand|%s", why); P("DONE"); return 5;
+    }
+
+    // weights: deterministic LCG fill. Latency is shape- and layout-determined;
+    // the real INT8 VAE artifact does not exist yet (Phase 1).
+    const size_t wlen = (size_t)c.Cout * c.Cin * c.k * c.k;
+    {
+        std::vector<int8_t> W(wlen);
+        uint32_t x = 0x9E3779B9u;
+        for (size_t i = 0; i < wlen; ++i) { x = x * 1664525u + 1013904223u; W[i] = (int8_t)((x >> 24) & 0xFF); }
+        rc = ANeuralNetworksModel_setOperandValue(h.m, iF, W.data(), wlen);
+        if (rc) { P("FATAL|conv_set_weights|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 5; }
+    }
+    {
+        std::vector<int32_t> B((size_t)c.Cout, 0);
+        rc = ANeuralNetworksModel_setOperandValue(h.m, iB, B.data(), B.size() * sizeof(int32_t));
+        if (rc) { P("FATAL|conv_set_bias|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 5; }
+    }
+    // causal conv 3x3: SAME padding, stride 1
+    const int32_t pad = c.k / 2, one = 1;
+    int32_t act = ANEURALNETWORKS_FUSED_NONE;
+    struct { uint32_t id; const void* p; size_t n; } scal[] = {
+        {ipl, &pad, 4}, {ipr, &pad, 4}, {ipt, &pad, 4}, {ipb, &pad, 4},
+        {isw, &one, 4}, {ish, &one, 4}, {iact, &act, 4},
+    };
+    for (auto& s : scal) {
+        rc = ANeuralNetworksModel_setOperandValue(h.m, s.id, s.p, s.n);
+        if (rc) { P("FATAL|conv_set_scalar|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 5; }
+    }
+
+    uint32_t op_in[10] = {iI, iF, iB, ipl, ipr, ipt, ipb, isw, ish, iact};
+    uint32_t op_out[1] = {iO};
+    rc = ANeuralNetworksModel_addOperation(h.m, ANEURALNETWORKS_CONV_2D, 10, op_in, 1, op_out);
+    if (rc) { P("FATAL|conv_addOperation|in=%d,%d,%d|rc=%d(%s)", c.N, c.H, c.W, rc, rcs(rc));
+              P("DONE"); return 5; }
+    uint32_t ins[1] = {iI}, outs[1] = {iO};
+    ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs);
+    rc = ANeuralNetworksModel_finish(h.m);
+    P("MODEL_FINISH|mode=conv|N=%d|H=%d|W=%d|Cin=%d|Cout=%d|k=%d|rc=%d(%s)",
+      c.N, c.H, c.W, c.Cin, c.Cout, c.k, rc, rcs(rc));
+    if (rc) { P("DONE"); return 6; }
+
+    bool sup[1] = {false};
+    int src = ANeuralNetworksModel_getSupportedOperationsForDevices(h.m, &tpu, 1, sup);
+    P("SUPPORT|mode=conv|rc=%d(%s)|conv2d_delegated=%d", src, rcs(src), src == 0 ? (sup[0] ? 1 : 0) : -1);
+
+    ANeuralNetworksCompilation* comp = nullptr;
+    int64_t c0 = now_ns();
+    rc = ANeuralNetworksCompilation_createForDevices(h.m, &tpu, 1, &comp);
+    if (rc) { P("FATAL|conv_comp_create|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 7; }
+    ANeuralNetworksCompilation_setPreference(comp, ANEURALNETWORKS_PREFER_SUSTAINED_SPEED);
+    rc = ANeuralNetworksCompilation_finish(comp);
+    const double compile_ms = (now_ns() - c0) / 1e6;
+    P("COMPILE|mode=conv|N=%d|H=%d|W=%d|Cin=%d|Cout=%d|k=%d|ms=%.1f|rc=%d(%s)",
+      c.N, c.H, c.W, c.Cin, c.Cout, c.k, compile_ms, rc, rcs(rc));
+    if (rc) { P("FATAL|conv_compile|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 7; }
+    if (iters <= 0) {
+        P("SUMMARY|mode=conv|probe_only=1|compile_ms=%.1f|macs=%lld", compile_ms, (long long)macs);
+        ANeuralNetworksCompilation_free(comp); ANeuralNetworksModel_free(h.m); P("DONE"); return 0;
+    }
+
+    std::vector<int8_t> A((size_t)c.N * c.H * c.W * c.Cin, 1);
+    std::vector<int8_t> O((size_t)c.N * c.H * c.W * c.Cout, 0);
+    std::vector<double> ms;
+    for (int it = 0; it < iters; ++it) {
+        for (int t = 0; t < tiles; ++t) {
+            ANeuralNetworksExecution* ex = nullptr;
+            if (ANeuralNetworksExecution_create(comp, &ex)) { P("FATAL|conv_exec"); P("DONE"); return 8; }
+            ANeuralNetworksExecution_setInput(ex, 0, nullptr, A.data(), A.size());
+            ANeuralNetworksExecution_setOutput(ex, 0, nullptr, O.data(), O.size());
+            int64_t t0 = now_ns();
+            int erc = ANeuralNetworksExecution_compute(ex);
+            int64_t t1 = now_ns();
+            ANeuralNetworksExecution_free(ex);
+            if (erc) { P("FATAL|conv_compute|tile=%d|rc=%d(%s)", t, erc, rcs(erc)); P("DONE"); return 8; }
+            ms.push_back((t1 - t0) / 1e6);
+            if (it == 0 && t == 0)
+                P("TILE|conv|tile=0|ms=%.3f|out0=%d", (t1 - t0) / 1e6, (int)O[0]);
+        }
+    }
+    double sum = 0;
+    for (double v : ms) sum += v;
+    const double per = sum / (double)ms.size();
+    P("OP|conv2d|N=%d|H=%d|W=%d|Cin=%d|Cout=%d|k=%d|compile_ms=%.1f|ms=%.3f|macs=%lld|gops=%.1f",
+      c.N, c.H, c.W, c.Cin, c.Cout, c.k, compile_ms, per, (long long)macs,
+      2.0 * (double)macs / (per / 1000.0) / 1e9);
+    P("SUMMARY|mode=conv|N=%d|H=%d|W=%d|Cin=%d|Cout=%d|k=%d|compile_ms=%.1f|ms=%.3f|gops=%.1f|samples=%zu",
+      c.N, c.H, c.W, c.Cin, c.Cout, c.k, compile_ms, per,
+      2.0 * (double)macs / (per / 1000.0) / 1e9, ms.size());
+    ANeuralNetworksCompilation_free(comp);
+    ANeuralNetworksModel_free(h.m);
+    P("DONE");
+    return 0;
+}
+
 static ANeuralNetworksDevice* find_tpu() {
     uint32_t n = 0;
     if (ANeuralNetworks_getDeviceCount(&n) != 0) return nullptr;
@@ -521,8 +655,8 @@ int main(int argc, char** argv) {
     int tiles = argc > 2 ? atoi(argv[2]) : 4;
     int iters = argc > 3 ? atoi(argv[3]) : 3;
     int M     = argc > 4 ? atoi(argv[4]) : 384;
-    if (argc > 5) G_PC = atoi(argv[5]) ? 1 : 0;
-    int only = argc > 6 ? atoi(argv[6]) : -1;   // single-mode op filter (-1 = all)
+    if (argc > 5 && strcmp(mode, "conv") != 0) G_PC = atoi(argv[5]) ? 1 : 0;
+    int only = (argc > 6 && strcmp(mode, "conv") != 0) ? atoi(argv[6]) : -1;   // single-mode op filter (-1 = all)
     RunCfg cfg{M, tiles, iters};
 
     if (M > 384) {
@@ -554,6 +688,21 @@ int main(int argc, char** argv) {
 
     ANeuralNetworksDevice* tpu = find_tpu();
     if (!tpu) { P("FATAL|no_edgetpu_device"); P("DONE"); return 3; }
+
+    // mode=conv <tiles> <iters> <N> <H> <W> <Cin> <Cout> <k> — one CONV_2D op,
+    // the T_V unit of measurement (VAE decode temporal-tap decomposition).
+    if (strcmp(mode, "conv") == 0) {
+        ConvCfg c;
+        c.N    = (argc > 4) ? atoi(argv[4]) : 9;
+        c.H    = (argc > 5) ? atoi(argv[5]) : 272;
+        c.W    = (argc > 6) ? atoi(argv[6]) : 480;
+        c.Cin  = (argc > 7) ? atoi(argv[7]) : 96;
+        c.Cout = (argc > 8) ? atoi(argv[8]) : 96;
+        c.k    = (argc > 9) ? atoi(argv[9]) : 3;
+        P("CONVCFG|N=%d|H=%d|W=%d|Cin=%d|Cout=%d|k=%d|tiles=%d|iters=%d",
+          c.N, c.H, c.W, c.Cin, c.Cout, c.k, tiles, iters);
+        return run_conv(tpu, c, tiles, iters);
+    }
 
     // mode=ksweep: bracket the K dimension the model validator accepts for a
     // single FC, and test whether ADD is accepted at all (signed vs unsigned

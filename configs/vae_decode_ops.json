@@ -1,0 +1,957 @@
+{
+  "preset": "preset_a",
+  "frames": 9,
+  "latent": [
+    3,
+    34,
+    60
+  ],
+  "output_fhw": [
+    9,
+    272,
+    480
+  ],
+  "total_macs": 5149683302400,
+  "conv_macs": 5117308600320,
+  "attention_macs": 32374702080,
+  "ops": [
+    {
+      "name": "decoder.conv_in",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 1015234560,
+      "cin": 16,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.mid_block.attentions.0",
+      "kind": "attention",
+      "out_positions": 6120,
+      "macs": 32374702080,
+      "cin": 384,
+      "cout": 384,
+      "k": null,
+      "chunks": 1,
+      "fhw": null
+    },
+    {
+      "name": "decoder.mid_block.resnets.0.conv1",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.mid_block.resnets.0.conv2",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.mid_block.resnets.1.conv1",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.mid_block.resnets.1.conv2",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.0.conv1",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.0.conv2",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.1.conv1",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.1.conv2",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.2.conv1",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.2.conv2",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.0.upsamplers.0.time_conv",
+      "kind": "conv",
+      "out_positions": 6120,
+      "macs": 5414584320,
+      "cin": 384,
+      "cout": 768,
+      "k": [
+        3,
+        1,
+        1
+      ],
+      "chunks": 3,
+      "fhw": [
+        3,
+        34,
+        60
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.0.upsamplers.0.resample.1",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 27072921600,
+      "cin": 384,
+      "cout": 192,
+      "k": [
+        3,
+        3
+      ],
+      "chunks": 1,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.0.conv1",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 81218764800,
+      "cin": 192,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.0.conv2",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 162437529600,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.0.conv_shortcut",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 3008102400,
+      "cin": 192,
+      "cout": 384,
+      "k": [
+        1,
+        1,
+        1
+      ],
+      "chunks": 3,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.1.conv1",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 162437529600,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.1.conv2",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 162437529600,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.2.conv1",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 162437529600,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.2.conv2",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 162437529600,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.upsamplers.0.time_conv",
+      "kind": "conv",
+      "out_positions": 40800,
+      "macs": 36097228800,
+      "cin": 384,
+      "cout": 768,
+      "k": [
+        3,
+        1,
+        1
+      ],
+      "chunks": 3,
+      "fhw": [
+        5,
+        68,
+        120
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.1.upsamplers.0.resample.1",
+      "kind": "conv",
+      "out_positions": 293760,
+      "macs": 194925035520,
+      "cin": 384,
+      "cout": 192,
+      "k": [
+        3,
+        3
+      ],
+      "chunks": 1,
+      "fhw": [
+        9,
+        136,
+        240
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.0.conv1",
+      "kind": "conv",
+      "out_positions": 293760,
+      "macs": 292387553280,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        136,
+        240
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.0.conv2",
+      "kind": "conv",
+      "out_positions": 293760,
+      "macs": 292387553280,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        136,
+        240
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.1.conv1",
+      "kind": "conv",
+      "out_positions": 293760,
+      "macs": 292387553280,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        136,
+        240
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.1.conv2",
+      "kind": "conv",
+      "out_positions": 293760,
+      "macs": 292387553280,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        136,
+        240
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.2.conv1",
+      "kind": "conv",
+      "out_positions": 293760,
+      "macs": 292387553280,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        136,
+        240
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.2.conv2",
+      "kind": "conv",
+      "out_positions": 293760,
+      "macs": 292387553280,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        136,
+        240
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.2.upsamplers.0.resample.1",
+      "kind": "conv",
+      "out_positions": 1175040,
+      "macs": 194925035520,
+      "cin": 192,
+      "cout": 96,
+      "k": [
+        3,
+        3
+      ],
+      "chunks": 1,
+      "fhw": [
+        9,
+        272,
+        480
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.0.conv1",
+      "kind": "conv",
+      "out_positions": 1175040,
+      "macs": 292387553280,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        272,
+        480
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.0.conv2",
+      "kind": "conv",
+      "out_positions": 1175040,
+      "macs": 292387553280,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        272,
+        480
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.1.conv1",
+      "kind": "conv",
+      "out_positions": 1175040,
+      "macs": 292387553280,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        272,
+        480
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.1.conv2",
+      "kind": "conv",
+      "out_positions": 1175040,
+      "macs": 292387553280,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        272,
+        480
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.2.conv1",
+      "kind": "conv",
+      "out_positions": 1175040,
+      "macs": 292387553280,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        272,
+        480
+      ]
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.2.conv2",
+      "kind": "conv",
+      "out_positions": 1175040,
+      "macs": 292387553280,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        272,
+        480
+      ]
+    },
+    {
+      "name": "decoder.conv_out",
+      "kind": "conv",
+      "out_positions": 1175040,
+      "macs": 9137111040,
+      "cin": 96,
+      "cout": 3,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "chunks": 3,
+      "fhw": [
+        9,
+        272,
+        480
+      ]
+    }
+  ],
+  "classes": {
+    "conv(3, 3, 3)_c16->384@6120": {
+      "kind": "conv",
+      "cin": 16,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "out_positions": 6120,
+      "macs": 1015234560,
+      "ops": 1,
+      "fhw": [
+        3,
+        34,
+        60
+      ],
+      "total_macs": 1015234560
+    },
+    "conv(3, 3, 3)_c384->384@6120": {
+      "kind": "conv",
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "out_positions": 6120,
+      "macs": 24365629440,
+      "ops": 10,
+      "fhw": [
+        3,
+        34,
+        60
+      ],
+      "total_macs": 243656294400
+    },
+    "conv(3, 1, 1)_c384->768@6120": {
+      "kind": "conv",
+      "cin": 384,
+      "cout": 768,
+      "k": [
+        3,
+        1,
+        1
+      ],
+      "out_positions": 6120,
+      "macs": 5414584320,
+      "ops": 1,
+      "fhw": [
+        3,
+        34,
+        60
+      ],
+      "total_macs": 5414584320
+    },
+    "conv(3, 3)_c384->192@40800": {
+      "kind": "conv",
+      "cin": 384,
+      "cout": 192,
+      "k": [
+        3,
+        3
+      ],
+      "out_positions": 40800,
+      "macs": 27072921600,
+      "ops": 1,
+      "fhw": [
+        5,
+        68,
+        120
+      ],
+      "total_macs": 27072921600
+    },
+    "conv(3, 3, 3)_c192->384@40800": {
+      "kind": "conv",
+      "cin": 192,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "out_positions": 40800,
+      "macs": 81218764800,
+      "ops": 1,
+      "fhw": [
+        5,
+        68,
+        120
+      ],
+      "total_macs": 81218764800
+    },
+    "conv(3, 3, 3)_c384->384@40800": {
+      "kind": "conv",
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "out_positions": 40800,
+      "macs": 162437529600,
+      "ops": 5,
+      "fhw": [
+        5,
+        68,
+        120
+      ],
+      "total_macs": 812187648000
+    },
+    "conv(1, 1, 1)_c192->384@40800": {
+      "kind": "conv",
+      "cin": 192,
+      "cout": 384,
+      "k": [
+        1,
+        1,
+        1
+      ],
+      "out_positions": 40800,
+      "macs": 3008102400,
+      "ops": 1,
+      "fhw": [
+        5,
+        68,
+        120
+      ],
+      "total_macs": 3008102400
+    },
+    "conv(3, 1, 1)_c384->768@40800": {
+      "kind": "conv",
+      "cin": 384,
+      "cout": 768,
+      "k": [
+        3,
+        1,
+        1
+      ],
+      "out_positions": 40800,
+      "macs": 36097228800,
+      "ops": 1,
+      "fhw": [
+        5,
+        68,
+        120
+      ],
+      "total_macs": 36097228800
+    },
+    "conv(3, 3)_c384->192@293760": {
+      "kind": "conv",
+      "cin": 384,
+      "cout": 192,
+      "k": [
+        3,
+        3
+      ],
+      "out_positions": 293760,
+      "macs": 194925035520,
+      "ops": 1,
+      "fhw": [
+        9,
+        136,
+        240
+      ],
+      "total_macs": 194925035520
+    },
+    "conv(3, 3, 3)_c192->192@293760": {
+      "kind": "conv",
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "out_positions": 293760,
+      "macs": 292387553280,
+      "ops": 6,
+      "fhw": [
+        9,
+        136,
+        240
+      ],
+      "total_macs": 1754325319680
+    },
+    "conv(3, 3)_c192->96@1175040": {
+      "kind": "conv",
+      "cin": 192,
+      "cout": 96,
+      "k": [
+        3,
+        3
+      ],
+      "out_positions": 1175040,
+      "macs": 194925035520,
+      "ops": 1,
+      "fhw": [
+        9,
+        272,
+        480
+      ],
+      "total_macs": 194925035520
+    },
+    "conv(3, 3, 3)_c96->96@1175040": {
+      "kind": "conv",
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "out_positions": 1175040,
+      "macs": 292387553280,
+      "ops": 6,
+      "fhw": [
+        9,
+        272,
+        480
+      ],
+      "total_macs": 1754325319680
+    },
+    "conv(3, 3, 3)_c96->3@1175040": {
+      "kind": "conv",
+      "cin": 96,
+      "cout": 3,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "out_positions": 1175040,
+      "macs": 9137111040,
+      "ops": 1,
+      "fhw": [
+        9,
+        272,
+        480
+      ],
+      "total_macs": 9137111040
+    }
+  }
+}

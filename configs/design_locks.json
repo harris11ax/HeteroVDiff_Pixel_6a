@@ -142,7 +142,12 @@
     "T_N_over_T_G_lower_bound": 2.58,
     "T_N_over_T_G_measured_sum": 4.18,
     "T_N_hybrid_mali_down_s_per_block": 0.4651,
-    "T_N_hybrid_note": "0.4178 (9/10 on the TPU, gate-compliant capture) + 0.04733 (ffn.down on Mali, MEASURED) = 0.4651 s/block -> T_N/T_G = 2.87. Use THIS T_N if ffn.down lands on Mali, which is the engineering recommendation; the 0.6758 / 4.18x figure above is the all-TPU architecture. Solving the cut with the wrong one moves k_b*."
+    "T_N_hybrid_note": "0.4178 (9/10 on the TPU, gate-compliant capture) + 0.04733 (ffn.down on Mali, MEASURED) = 0.4651 s/block -> T_N/T_G = 2.87. Use THIS T_N if ffn.down lands on Mali, which is the engineering recommendation; the 0.6758 / 4.18x figure above is the all-TPU architecture. Solving the cut with the wrong one moves k_b*.",
+    "T_V_conv_tpu_s_per_chunk": 11.412,
+    "T_V_conv_tpu_gops": 896.8,
+    "T_V_conv_tpu_macs": 5117300000000.0,
+    "T_V_conv_tpu_status": "COMPLETE measured sum over 100% of the decode's conv MACs as kT shifted 2-D CONV_2D taps, one execute per frame per tap (batch>1 will not compile above ~2.4 MB/frame). HOT start: TPU 45->60 C, VIRTUAL-SKIN 37.3->39.0 C vs a battery+3 gate of ~32.6 C, so this is an UPPER bound and not table-grade. T_V_s_per_chunk stays null until (a) a gate-compliant re-run and (b) the mid-block 3-D attention (32.4 GMAC, 6120 tokens) is measured - it is 0.6% of MACs and has no rate yet. Evidence: docs/device/RESULTS_vae_tv.md, docs/device/conv_sweep_20261115_181754.json.",
+    "T_V_conv_tpu_note": "CONV_2D reaches 685-1842 GOPS on this HAL vs 285 GOPS for FULLY_CONNECTED: the Edge TPU is a conv engine and the DiT block's 10 GEMMs are being served by the wrong op class. Worth testing ffn.up/attn as 1x1 CONV_2D before accepting the 4.18x T_N/T_G penalty as silicon."
   },
   "cut": {
     "formula": "period(k_b) = max(k_b*T_G, (B-k_b)*T_N + T_V); k* = (B*T_N + T_V)/(T_N + T_G)",
@@ -233,7 +238,8 @@
       "attn_1536x1536": 8.02,
       "ffn_up_1536x8960": 36.74
     },
-    "evidence": "docs/device/RESULTS_npu_tn.md + docs/device/npu_tn_20261115_153652.json"
+    "evidence": "docs/device/RESULTS_npu_tn.md + docs/device/npu_tn_20261115_153652.json",
+    "conv2d_batch_ceiling": "CONV_2D compiles with a batch dim only while the per-frame input is small: N=3 at 0.78 MB/frame compiles in 141.6 ms; N=5/N=3 at 1.4 MB/frame and N=3/N=9 at 6.3 MB/frame grind 31-36 s in Compilation_finish and fail, while the same 37.6 MB tensor compiles in 263 ms at N=1. getSupportedOperationsForDevices reports these shapes delegated=1 and is again not a viability test. Decompose on the frame axis: one execute per frame per temporal tap."
   },
   "mali_int8_gemm": {
     "_comment": "Measured on the device 2026-11-15. Evidence: docs/device/RESULTS_gemm_mali.md + docs/device/gemm_mali_20261115_152103.json",
