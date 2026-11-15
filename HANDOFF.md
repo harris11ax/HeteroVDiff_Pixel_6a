@@ -21,10 +21,10 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | Gate 0 (capabilities) | **done** → `docs/device/RESULTS_gate0.md` |
 | Gate 2 (zero-copy) | **pass** on both routes; file-mmap route B preferred |
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
-| **NPU block graph (`T_N`)** | **partial** → `docs/device/RESULTS_npu_tn.md`; 9/10 GEMMs measured gate-compliant (0.4178 s/block, ≥2.58× `T_G`), `ffn.down` has no compilable graph |
+| **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | Gate 1 (artifact) | pending — quantiser not written yet (`phase1_quant/` has only the inspector) |
 | Gates 3–5 | pending |
-| Blocker | `T_N`, `T_V`, co-run `T_G` unmeasured ⇒ `k_b*` still TBD |
+| Blocker | `T_V`, co-run `T_G` unmeasured ⇒ `k_b*` still TBD (`T_N/T_G = 4.18×`) |
 
 ## The two results that changed the project
 
@@ -42,8 +42,16 @@ arithmetic bound, for structural reasons**: 9 of the block's 10 GEMMs run at 204
 `Compilation_finish`; `ffn.down` (K=8960) **never compiles** (`DEAD_OBJECT` after ~62 s hot,
 `OP_FAILED` after 47 s cool); and
 **per-output-column weight scales are rejected by `FULLY_CONNECTED`** at `addOperation`, so the
-locked quantisation cannot be expressed on the NPU stage. `T_N` stays null until `ffn.down` has a
-graph.
+locked quantisation cannot be expressed on the NPU stage.
+
+`ffn.down` was then closed (2026-11-15 17:48, `RESULTS_npu_tn.md` §4): the compiler's limit is the
+**reduction dimension** — K ≤ 1664 compiles in ~0.5 s, K ≥ 1792 grinds for 46–59 s and returns
+`OP_FAILED` — so the down projection has no graph at K=8960 *or* at any 2-way/4-way split. It does
+run as 7 × FC`[1536,1280]` + 6 × `ADD`, one compilation per op (2.57 s of compile), at
+**0.2580 s/block (163.9 GOPS) — 5.45× the Mali time for the same shape (47.33 ms)**. `T_N` is
+therefore **0.6758 s/block** and `T_N/T_G = 4.18×`: the GPU is 4.2× faster per block, and the down
+projection belongs on Mali whichever way the cut lands. Both branches are measured; the choice is
+the student's.
 
 Caveat that must survive into the paper: 161.8 ms and the NPU per-GEMM rates are **solo** kernel
 rates. The NPU rates are now gate-compliant (cool start, TPU 29.0 °C, capture `…_160146`) and a cool
@@ -58,10 +66,11 @@ device network off — use `python tools/npu/cool_rerun.py`, never a bare timed 
    `python tools/npu/cool_rerun.py` (waits for the floor, then runs the harness under it). Note:
    with the Play Store background service running the TPU zone sat at 44–48 °C and the gate was
    unreachable — kill device network for the run.
-2. **`ffn.down` path** — the down projection has no compilable FC. Pick and measure one of:
-   chunked-K FC + `ADD` (2× K=4480 or 4× K=2240) on the TPU, or the down projection on Mali
-   (OpenCL, where the tiled kernel already runs this shape at 890 GOPS per `RESULTS_gemm_mali.md`).
-   This is now the *only* thing standing between the 0.4178 s lower bound and a real `T_N`.
+2. ~~**`ffn.down` path**~~ — **done 2026-11-15 17:48, both branches measured**. Single FC has no
+   compilable graph at K=8960/4480/2240/1792 (compiler K ceiling: 1664 OK in ~0.5 s, 1792 fails
+   after 48.7 s). Measured: Mali **47.33 ms/block** vs Edge TPU 7×K=1280+6×ADD
+   **258.0 ms/block** ⇒ 5.45× in Mali's favour. New modes: `downsep`, `kcompile`, `ksweep`,
+   `diag` (see `RESULTS_npu_tn.md` §4). `T_N` = **0.6758 s/block**.
 3. **Per-column scales vs the NPU stage.** `FULLY_CONNECTED` only takes per-tensor weight scales.
    Either the NPU graph uses per-tensor scales (measure the Gate 1/4 parity cost) or the NPU is
    restricted to shapes with an equivalent path. This touches `design_locks.json` → student's call.
