@@ -1,0 +1,85 @@
+{
+  "_comment": "Machine-readable locked design parameters. Updated only with evidence. 'assumed': true means the recommended default was taken while the student's answer was pending.",
+  "model": {
+    "repo": "cszy98/DCM",
+    "subdir": "DCM_WAN",
+    "backbone": "WanTransformer3DModel (DCM dual-expert distillation)",
+    "L_blocks": 30,
+    "N_steps": 6,
+    "B_block_executions": 180,
+    "timesteps": [1000, 992, 982, 949, 905, 810],
+    "detail_expert_threshold_t": 978,
+    "kappa_switch_step": 3,
+    "expert_schedule": ["semantic", "semantic", "semantic", "detail", "detail", "detail"],
+    "d_model": 1536,
+    "heads": 12,
+    "head_dim": 128,
+    "ffn_dim": 8960,
+    "ffn_activation": "gelu_tanh_approximate",
+    "patch_size": [1, 2, 2],
+    "rope": {"theta": 10000.0, "head_dim_split": {"t": 44, "h": 42, "w": 42}, "max_seq_len": 1024},
+    "measured": {
+      "total_params": 1539041408,
+      "params_per_block": 49586432,
+      "int8_bytes_per_block": 49586432,
+      "int8_mib_per_block": 47.29,
+      "base_attn_params": 566231040,
+      "base_ffn_params": 825753600,
+      "lora_params": 94371840,
+      "expert_timestep_params": 25672768,
+      "int8_base_artifact_gib": 1.296,
+      "expert_factors_mib": 114.5
+    }
+  },
+  "quantisation": {
+    "scheme": "per-output-column symmetric int8, s_j = max_i |W_ij| / 127",
+    "clip": [-127, 127],
+    "weight_layout": "row-major [N_out, K], K contiguous",
+    "hmx_tiling": "dropped (no HMX on Tensor G1)",
+    "fp16_kept": ["bias", "norm weights", "scale_shift_table (AdaLN)", "patch_embedding", "proj_out", "condition_embedder*"],
+    "expert_factors": "factorised, FP16, never merged into the INT8 base",
+    "activation_numerics": {
+      "gpu_hidden_state": "fp16 + per-GEMM calibrated input scale (max|x|/127)",
+      "npu_residual_stream": "fp32, narrowed to fp16 only at GEMM operands"
+    }
+  },
+  "workload": {
+    "nature": "text-to-video chunk stream (checkpoint has no image conditioning)",
+    "frames_per_chunk": 9,
+    "latent_frames_Fz": 3,
+    "chunks_per_stream": 10,
+    "presets": {
+      "baseline": {"h": 256, "w": 256, "H_z": 32, "W_z": 32, "M": 768},
+      "preset_a": {"h": 272, "w": 480, "H_z": 34, "W_z": 60, "M": 1530},
+      "preset_b": {"h": 480, "w": 832, "H_z": 60, "W_z": 104, "M": 4680}
+    },
+    "primary_preset": "preset_a",
+    "primary_preset_assumed": true
+  },
+  "engines": {
+    "process_a": {"target": "Mali-G78 MP20 via OpenCL", "role": "prefix blocks [0, k_b)"},
+    "process_b": {"target": "Tensor Edge TPU via NNAPI", "role": "suffix blocks [k_b, 180) + VAE decode"},
+    "second_engine_fallback": "undecided — CPU cluster via XNNPACK if Gate 0 shows Mali is not a viable stage",
+    "zero_copy_route": "undecided: A (AHardwareBuffer + SCM_RIGHTS) -> B (file-backed MAP_SHARED mmap) -> C (private copies, Gate-2 failure)",
+    "decision_source": "docs/device/probe_<ts>.json (Gate 0)"
+  },
+  "rates": {
+    "T_G_s_per_block": null,
+    "T_N_s_per_block": null,
+    "T_V_s_per_chunk": null,
+    "status": "TBD (blocked: no device attached)",
+    "note": "must be measured with both engines co-running, at the target resolution and thermal state"
+  },
+  "cut": {
+    "formula": "period(k_b) = max(k_b*T_G, (B-k_b)*T_N + T_V); k* = (B*T_N + T_V)/(T_N + T_G)",
+    "k_b": null,
+    "status": "TBD (blocked on rates)"
+  },
+  "gates": {
+    "gate_1_artifact": {"status": "pending", "targets": "int8 bytes = 1.296 GiB +/- 1 MiB; PSNR >= 28 dB, SSIM >= 0.92 vs FP32 (host simulation)"},
+    "gate_2_zero_copy": {"status": "pending", "targets": "same DMA-BUF inode / file mapped by both runtimes; no second base-weight copy"},
+    "gate_3_thermal": {"status": "pending", "targets": "every timed run starts at max(SoC zone) <= ambient + 3 C"},
+    "gate_4_parity": {"status": "pending", "targets": "per-block cosine >= 0.999 vs FP32; frame PSNR >= 28 dB, SSIM >= 0.92"},
+    "gate_5_memory": {"status": "pending", "targets": "PSS(proc A) + PSS(proc B) < 2.2 GiB"}
+  }
+}

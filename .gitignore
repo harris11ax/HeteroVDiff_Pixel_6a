@@ -1,0 +1,25 @@
+# Heavy / generated content — never committed
+weights_raw/
+third_party/
+artifacts/
+results/raw/
+docs/device/*.json
+*.safetensors
+*.bin
+*.npy
+*.mp4
+*.png
+!docs/**/*.png
+
+# build output
+tools/android/*/build/
+phase3_pipeline/build/
+__pycache__/
+*.pyc
+.venv/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
