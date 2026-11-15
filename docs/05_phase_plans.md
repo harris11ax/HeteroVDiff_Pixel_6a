@@ -75,8 +75,12 @@ Deliverables in `phase2_profile/` + `tools/`:
    9-frame latent through the chosen decoder path), **each alone and while the other engine is
    busy** — the paper's whole point is that co-run ≠ solo (NPU +10…19 %, GPU −1…2 %).
 3. `phase2_profile/thermal.py` — cooldown polling + run bookkeeping (`--cooldown`, logs zone temps).
-4. `phase2_profile/solve_cut.py` — implements Eq. 4/5, evaluates all integer `k_b ∈ [1,179]`,
-   writes `configs/cut_schedule.json` for every resolution preset.
+4. `phase2_profile/solve_cut.py` — **implemented** and self-tested: implements Eq. 4/5, evaluates
+   every integer `k_b ∈ [1,179]`, reports the step-level and no-`T_V` ablations, and writes
+   `configs/cut_schedule.json`. `python phase2_profile/solve_cut.py --selftest` anchors the solver
+   on the paper's own Table 5 (its stage times imply `T_G=13.25 s, T_N=3.16 s, T_V=267 s` → the
+   solver returns the paper's `k_b = 51`). Note the paper's own period column (683 s) exceeds
+   `max(676, 675)` by ~7 s — expect a fixed per-chunk overhead in your runs too.
 5. `phase2_profile/RESULTS.md` — the table of measured rates with the phone's thermal state.
 
 **Gate 2 commands:** `python tools/probe/probe_host.py --cooldown 30` then
