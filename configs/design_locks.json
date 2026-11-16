@@ -149,6 +149,10 @@
     "T_V_conv_tpu_status": "COMPLETE gate-compliant measured sum over 100% of the decode conv MACs, as kT shifted 2-D CONV_2D taps, one execute per frame per tap (batch>1 will not compile above ~1 MB/frame). Sweep start TPU 32.0 C vs a 32.1 C battery+3 gate (PASS, confirmed on a second sample); the two dominant classes (68% of MACs) ran at that floor. T_V_s_per_chunk stays null because the mid-block 3-D attention (32.4 GMAC, 6120 tokens) is not a conv and has no measured rate (0.6% of MACs), and the Mali branch is unmeasured. Hot control run (18:17): 11.412 s -> the cool run is 7.5% faster. Evidence: docs/device/RESULTS_vae_tv.md, conv_sweep_20261115_182512.json.",
     "T_V_conv_tpu_note": "CONV_2D reaches 719-2024 GOPS on this HAL on the gate-compliant run (685-1842 on the hot control) vs 285 GOPS for FULLY_CONNECTED: the Edge TPU is a conv engine and the DiT block's 10 GEMMs are being served by the wrong op class. Worth testing ffn.up/attn as 1x1 CONV_2D before accepting the 4.18x T_N/T_G penalty as silicon.",
     "T_V_conv_tpu_hot_s_per_chunk": 11.412,
+    "T_V_conv_mali_s_per_chunk": 12.256,
+    "T_V_conv_mali_gops_mac": 417.5,
+    "T_V_conv_mali_gops_flop": 835.1,
+    "T_V_engine_convention_note": "The GOPS columns in RESULTS_vae_tv.md are NOT on the same basis. The TPU numbers (969.7 aggregate, 2024 best class) are FLOP/s = 2xMAC/s. The Mali class column (378-486) and its 417.5 aggregate are MAC/s. Like-for-like Mali is 835.1 FLOP-GOPS, so the TPU is 1.161x faster at the decode - identical to the time ratio 12.256/10.554, which is the number to quote. On that basis the Mali conv kernel runs at 95.2% of Mali's own 877 FLOP-GOPS GEMM rate (47.2% of the 1770 peak), NOT the '48% of the GEMM rate' stated in RESULTS_vae_tv.md section 6 - 48% looks like percent-of-peak. Consequence: the 'halo-staged activation tile, 871 GOPS ceiling' next action assumes ~2x headroom that this arithmetic does not support; residual headroom is ~5% aggregate, ~14% on the best class.",
     "T_V_decode_vs_T_G_blocks": 65.2
   },
   "cut": {
