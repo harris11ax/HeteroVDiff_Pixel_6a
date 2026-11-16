@@ -3,7 +3,9 @@
 *Updated 2026-11-16 (05:05, **P3.8c — the VAE decode at a table-grade start: 592/592 `CONV_2D`
 executes in 8,834.7 ms (0.837× the plan's per-op sum) from a 24.0 °C start against a 24.1 °C gate,
 and the decode's `CONV_2D` class carries its own temperature term (+1.7 % median, +5.2 % worst,
-identical shapes early→late) that the FC stage does not**). This
+identical shapes early→late) that the FC stage does not; and **Gate 1's end-to-end PSNR/SSIM leg
+PASSES at 40.22 dB / SSIM 0.9708** weight-only, with the two 0.9974-cosine `time_conv` layers
+carrying the whole cost). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
 `docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
@@ -32,7 +34,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound. The decode now also **executes** end-to-end off the INT8 artifact: **8,834.7 ms** of conv compute, 592/592 dispatches, table-grade start → `docs/device/RESULTS_vae_convseq.md` §P3.8c |
-| Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg — no longer environment-blocked: `.venv-ref` (torch 2.15.0+cpu, diffusers 0.43.0) is installed, commit `8663c3f`** |
+| Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **End-to-end PSNR/SSIM leg now PASS** (2026-11-16 05:10, `phase1_quant/psnr_gate1.py`, capture `gate1_psnr_20261116_051022`): **40.22 dB / SSIM 0.9708** with all 36 decoder layers rebuilt from the INT8 artifact vs the fp32 reference (bar 28 dB / 0.92), 36/36 reconstructions reproduce the manifest's `rel_fro` to 4.5e-07; leaving the two 0.9974-cosine `time_conv` layers fp32 recovers **48.99 dB / 0.9962** ⇒ those two layers are the whole cost. **Weight-only** — activations still need `SA` from `calibrate.py` |
 | **Gate 3 (parity)** | **measured, FAILS as configured — but LOCALIZED and a passing recipe exists** → `docs/device/RESULTS_gate3_parity.md` + `docs/device/RESULTS_gate3_bisect.md`, tools `tools/pipe/gate3_parity.py`, `tools/pipe/gate3_bisect.py`, `proc_b --dump-parity/--probe-dir/--act`. The break is the **M (row) direction**: `N = 384` graphs are **100.00 % bit-exact (Δ = 0, 0 elements off by ≥2)** at `M = 1/8/128/160/192/200`, `N = 768` at `M = 128`, `N = 1536` at `M = 1`, on both `attn1.to_q` and `ffn.up`; the same 384-column graph at `M = 384` **will not compile** (`OP_FAILED`, ~58 ms). Wide graphs at `M = 256…384` return 25.8–50.7 %. So the fix Gate 3 proposed ("one graph per 384-column block") is the exact graph this compiler refuses, and the exact recipe is `N ∈ {128,384,768}` × `M ≤ 200` = **112 executes/block** instead of 9 at 384 tokens (**448 executes / 56 compilations at the stage's 1536 tokens; cost now measured in P3.7c**) |
 | Gates 4–5 | Gate 4 PASS (memory + one copy) |
 | **Exact recipe `T_N` (P3.7c)** | **measured** → `docs/device/RESULTS_tn_recipe.md`: the only bit-exact geometry (P3.7b) costs **0.7164 s/block** for the nine GEMMs = **1.90× the 377.8 ms 9-graph stage**, **140 GOPS** vs 265, at **56 compilations (8.64 s) / 448 executes** per block — and returns **448/448 tiles bit-exact (Δ = 0 LSB)**, `ffn.up`'s tail-128 block included, checked byte-wise against the artifact. 4 runs, 0.3 % spread. `solve_cut.py` on the measured pair: `k_b* = 166`, period **24.47 s (+3.6 %)** — **reported, not applied** (solo vs the locked co-run number) |
@@ -435,12 +437,14 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  cheaper decode moves the cut 2 blocks and 1.1 %, so the cut is insensitive to it; lock untouched.
  Defect fixed: `cool_rerun.py` returned 3 on a single failed confirm sample (it threw away 17 min of
  cooling at 04:39 on a 1 °C-quantised TPU zone) and now re-enters the wait loop, as P3.7e claimed.
-  **NEXT ACTION (host-only, needs no phone): Gate 1's FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg —
- it needs the reference decode path wired in `.venv-ref` (torch 2.15.0+cpu, diffusers 0.43.0; measured
- 449.9 GFLOPS ⇒ one 10.2 TFLOP decode pass ≈ 23 s) and the INT8 numbers applied as
- quantise-dequantise weights, so the same code path yields both sides. Then `calibrate.py` (the only
- source of `SA`, which is what turns "executes" into "decodes"), then wire `proc_b --decode 1` to call
- `convseq` instead of printing the reference, then Gate 5 (≥10 chunks with the decode in it).**
+  **NEXT ACTION (host-only, needs no phone): `calibrate.py` — deliverable 4.** Gate 1's PSNR/SSIM
+ leg is now **done and PASSing** (`phase1_quant/psnr_gate1.py`, 40.22 dB / 0.9708 weight-only), so
+ the remaining host-only blocker is the activation scale: `calibrate.py` must run the FP32 forward
+ and record `max|x|/127` per (step, block, GEMM) — it is the only source of `SA`, and `SA` is what
+ turns "the decode executes" into "the decode decodes" (and what makes the device's INT8 activations
+ comparable to the 40.22 dB weight-only number). Each decoder pass is 30.5 s on `.venv-ref`, so the
+ whole 36-layer sweep is minutes. Then wire `proc_b --decode 1` to call `convseq` instead of printing
+ the reference, then Gate 5 (≥10 chunks with the decode in it).**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)

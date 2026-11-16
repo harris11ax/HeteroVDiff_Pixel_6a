@@ -82,14 +82,55 @@ are a further **240,089,216 B (229.0 MiB)** of FP16 for the whole model (120,044
 47.29 MiB stays the right *ceiling* for a region that would have to hold both; the artifact as built
 is 44.25 MiB INT8 + 98 KiB FP16 per block. Nothing here reopens a decision.
 
-## Still open (Gate 1 leg 4)
+## Leg 4 — end-to-end PSNR/SSIM: **PASS** (run 2026-11-16 05:10:22)
 
-The end-to-end FP32-vs-INT8-simulated forward on one 9-frame 256×256 prompt (PSNR ≥ 28 dB,
-SSIM ≥ 0.92) **has not run**. Blocker: this host has no `torch` and no `diffusers`
-(`import torch` → `ModuleNotFoundError`), and the reference path needs the Wan transformer + umT5 +
-`AutoencoderKLWan` to execute at all. Options in cost order: (a) `pip install torch --index-url
-<cpu wheel index> diffusers` (~2.5 GB; 9 frames at 256×256 on CPU is minutes); (b) reuse the
-authors' pipeline if it runs CPU-only; (c) numpy FP32 forward — large, only if torch is unavailable.
+The environment question is closed (`.venv-ref`, torch 2.15.0+cpu / diffusers 0.43.0, commit
+`8663c3f`), and the leg has now run. Tool `phase1_quant/psnr_gate1.py`, run record
+`docs/device/RESULTS_gate1_psnr.md`, capture `gate1_psnr_20261116_051022.json`.
 
-Next: `phase1_quant/expert_factors.py` (deliverable 2, expects 240,089,216 B FP16) and
-`vae_export.py` (deliverable 3), then the PSNR leg.
+**Method.** Load the reference `AutoencoderKLWan` in fp32; decode a fixed seeded latent
+`[1, 16, 3, 34, 60]` (Preset A → 9 × 3 × 272 × 480); then rebuild **every decoder weight** from
+`artifacts/vae/` (the INT8 bytes × the artifact's own per-output-channel scales, OHWI per tap,
+inverted to `[Cout, Cin, kT, kH, kW]`) and decode the same latent through the same code path. One
+pass is **30.5 s** for 5,117.3 GMAC on this CPU — the decode is cheap enough to repeat.
+
+| config | layers quantised | PSNR | SSIM | verdict |
+|---|---|---|---|---|
+| **all 36 quantised (the locked scheme, whole decoder)** | 36/36 | **40.22 dB** | **0.9708** | **PASS** |
+| quantised except the two worst weight-cosine layers | 34/36 | 48.99 dB | 0.9962 | PASS |
+| Gate 1 bar | — | ≥ 28 dB | ≥ 0.92 | — |
+
+**The inversion is asserted, not assumed.** Each rebuilt weight must reproduce the artifact
+manifest's recorded per-layer `rel_fro`; all **36/36** do, to a max |diff| of **4.5e-07**. A
+transposed or tap-shifted rebuild still looks quantised, so this is the check that the number is
+the artifact's and not an accident.
+
+**Attribution — the loss concentrates in two layers, not the scheme.** Leaving
+`up_blocks.{0,1}.upsamplers.0.time_conv` in fp32 (weight cosine **0.9974**, the two layers P3.8a
+already flagged as the locked per-column scheme's casualties) moves 40.22 → **48.99 dB** and
+0.9708 → 0.9962: those **two of thirty-six layers carry 8.77 dB** of the end-to-end loss. So the
+cost is *localised* — a per-output-column scale on a 3×1×1 temporal conv — rather than a diffuse
+cost of INT8, which is the ground on which the per-`(channel, tap)` alternative (worst layer
+0.999910) should be judged. Not claimed: that 48.99 dB is the fp32 decoder. The residual 8.77 dB
+above it is the other 34 layers' contribution and is not decomposed here; one more config per layer
+group would price it, and that is the student's call to spend.
+
+Per-frame (all-quantised): f0 53.49, f1 38.47, f2 43.21, f3 41.85, f4 40.89, **f5 37.88 (min)**,
+f6 39.33, f7 39.45, f8 39.13 dB. Frame 0 is the causal boundary frame — cheap to predict, hence the
+outlier in the good direction.
+
+**Scope that must survive into the paper.** This is **weight-only**: activations stay fp32 because
+the activation scale `SA` is `calibrate.py`'s output and nothing may invent it. The device's INT8
+activation path is a *different* and additional cost; this number answers "does the locked weight
+quantiser preserve the decoder", which is what Gate 1's bar asks.
+
+**Harness bug caught en route, and why it mattered.** The first version cloned the *quantised*
+tensors as its "pristine fp32" copy, so the fp32-restore step re-applied INT8 and the two configs
+produced **bit-identical** output (PSNR 40.2159098895 dB both, `SSIM` 0.9708006514 both). The
+headline number was still valid (the fp32 reference is decoded before any patching), but the
+attribution was fiction. Now every config's output is hashed and a repeat hash **raises** instead
+of printing a plausible table. Same class of failure as the P3.8a coverage bug: a plausible table
+with nothing behind it.
+
+Next: `calibrate.py` (the only source of `SA`, which is what turns "executes" into "decodes"), then
+`phase1_quant/expert_factors.py` / `vae_export.py` are already done — see `RESULTS_phase1_artifacts.md`.
