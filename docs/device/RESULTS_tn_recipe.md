@@ -305,3 +305,47 @@ no `yes` and no `hv_proc_b` left running, tree clean.
 `solve_cut.py --Tg 0.1474 --Tn 0.8974 --Tv 10.640` → **k_b\* = 165**, period **24.32 s**, 7.08× vs
 NPU-only — identical to P3.7e's 165 / 24.32 s. The third independent post-boot `T_N` leaves the cut
 where it is; the lock is untouched.
+
+## P3.7i — same-boot order A/B: order is a non-effect (the 9.7 % was the reboot), and the block carries a *start*-temperature term
+
+P3.7h showed the gemm-major and pass-major numbers had only ever been taken on different boots, so
+`proc_b` grew **`--recipe-order pass|gemm`**: both orders hold all 56 graphs at once and differ **only
+in the loop nesting**, which isolates *order* from both compile pattern and boot. `tn_recipe.py
+--order` drives it. Two captures in the **same boot**, gate-gated starts 1 °C apart:
+
+| capture | order | start TPU | steady block (n = 7) | spread | stdev |
+|---|---|---|---|---|---|
+| `tn_recipe_…_031159` | **gemm** | 32.0 | **649.52 ms** | 646.2 – 651.3 | 1.72 |
+| `tn_recipe_…_031414` | **pass** | 31.0 | **651.23 ms** | 649.0 – 653.4 | 1.26 |
+
+Gemm-major is **1.71 ms (0.26 %) faster** while starting 1 °C **hotter** — i.e. the difference is
+inside the 1.5 % within-run spread on either side. **The execution order does not cost anything.**
+
+**Corrected in the record:** P3.7e's "pass-major is **9.7 % cheaper** than gemm-major (646.7 vs
+716.4 ms)" is **retracted as an order effect** — it compared a post-boot number with a pre-boot one
+(P3.7h). Pass-major stays the default because it is free, not because it is faster; its real virtue is
+that a pass is contiguous in time and therefore classifiable solo vs contended (P3.7d).
+
+### The block also carries a start-temperature term (~+0.15 %/°C), which P3.7f's intra-run view hid
+
+Every post-boot floor-gated solo measurement of the pass-major recipe, with its start temperature:
+
+| start TPU | steady block | capture |
+|---|---|---|
+| **25.0** | **639.44 ms** | P3.7h `…_025927` |
+| 26.0 | 647.93 ms | P3.7f `…_023810` |
+| 27.0 | 646.69 ms | P3.7e `…_023152` |
+| 31.0 | 651.23 ms | P3.7i `…_031414` |
+| 32.0 | 649.52 ms | P3.7i `…_031159` (gemm) |
+
+The 25 → 31/32 °C ends differ by **1.8 %** (+7.5 ms over 7 °C ≈ **+0.15 %/°C**), while P3.7f measured
+only **+0.16 %** across 26 → 33 °C *within* one run. Both are true and they are different quantities:
+**the start temperature sets the regime (a cooler start runs faster), and once running the pass itself
+barely drifts.** The 26/27 °C points overshoot the 25/31 line by ~1 %, so this is a 1.8 % band across a
+25–32 °C start, not a fitted law — DVFS is the candidate and this HAL exposes no readable clock, so no
+mechanism is claimed.
+
+**Consequence for quoting `T_N`:** the exact recipe is **646.7 ± 0.7 ms** for a 25–27 °C start and
+**650 ± 1 ms** for a 31–32 °C start. `solve_cut.py` at both ends (`T_N` = 0.8974 s and 0.9095 s,
+`T_G` 0.1474, `T_V` 10.640) gives **k_b\* = 165 and period 24.32 s in both cases** — the 1.8 % does not
+move the cut, and the lock stays untouched. Quote the start temperature next to any block time.

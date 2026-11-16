@@ -203,6 +203,10 @@ def main() -> int:
     ap.add_argument("--dump", action="store_true",
                     help="dump every graph's int8 output on pass 1 and verify it against the "
                          "weight bytes on the host (basis activation => expected == W byte)")
+    ap.add_argument("--order", choices=["pass", "gemm"], default="pass",
+                    help="execution order inside the graph set (both hold all 56 graphs); "
+                         "`gemm` reproduces P3.7c's nesting so the order effect can be measured "
+                         "inside one boot (P3.7h found it never was)")
     ap.add_argument("--verify-only", action="store_true")
     args = ap.parse_args()
 
@@ -265,10 +269,11 @@ def main() -> int:
 
         cmd = (f"shell cd /data/local/tmp && {REMOTE_BIN} --block {REMOTE_BLK} --recipe 1 "
                f"--recipe-gemms {args.gemms} --recipe-reps {args.reps} --recipe-row {args.row} "
-               f"--recipe-col {args.col} --recipe-tokens {args.tokens} --down skip --decode 0"
+               f"--recipe-col {args.col} --recipe-tokens {args.tokens} --down skip --decode 0 "
+               f"--recipe-order {args.order}"
                + (f" --recipe-dump {REMOTE_DUMP}" if args.dump else ""))
         print(f"  running: gemms={args.gemms} reps={args.reps} row={args.row} col={args.col} "
-              f"tokens={args.tokens}")
+              f"tokens={args.tokens} order={args.order}")
         t0 = time.time()
         rc, raw = adb(serial, cmd, timeout=args.timeout)
         wall = time.time() - t0
