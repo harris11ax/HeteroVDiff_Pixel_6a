@@ -375,10 +375,32 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  per-tensor like `attn`), and **`$10` in POSIX `sh` is `${1}0`** (turned `--recipe-reps 8` into
  100). New: per-tile `TS|downsep` stamps and a `--from-logs TS` re-parse path (raw logs +
  `.ctx.json` sidecar written *before* analysis, so an analysis bug costs a re-parse, not a run).
- **NEXT ACTION: the real Phase-3 remainder, in this order — (a) `--decode 1` is still a no-op stub
- (it prints the 10.640 s hybrid reference and executes nothing), so the stage has no decode; (b)
- Gate 1's FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg and `calibrate.py` remain the only host-only
+ **NEXT ACTION: the real Phase-3 remainder, in this order — (a) `--decode 1` is still a no-op stub**
+ (it prints the 10.640 s hybrid reference and executes nothing): **its input now exists, see P3.8a
+ below — the execution itself (`npu_block convseq`) is the next device run**; (b) Gate 1's
+ FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg and `calibrate.py` remain the only host-only
  work and `.venv-ref` exists; (c) Gate 5, the ≥10-chunk end-to-end run with the decode in it.**
+ **P3.8a DONE 2026-11-16 04:12 — the VAE decoder's INT8 artifact, i.e. the bytes `--decode 1` will
+ execute** → `docs/device/RESULTS_vae_int8.md`, tool `phase1_quant/vae_int8.py`, artifacts
+ `artifacts/vae/{weights_int8.bin,scales_f32.bin,bias_f32.bin,vae_int8.json}` (2.7 s to regenerate).
+ 36 decoder layers, **100 temporal taps, 592 `CONV_2D` executes/chunk == the plan's count**;
+ **72,685,152 B INT8 unpadded** (= `configs/vae/layers.json` exactly) → **72,751,648 B** with
+ 4096-B tap windows (+0.091 %), **42,636 B** of FP32 per-output-channel scales, **42,636 B** of FP32
+ biases. Layout **OHWI per tap** (transpose of `[Cout,Cin,kT,kH,kW]`) and proved, not asserted: a
+ random activation through the checkpoint weight vs the dequantised INT8 taps under the same 2-D
+ SAME conv gives **0.93 / 1.47 / 1.40 % relFro, cosine 0.99996 / 0.99989 / 0.99990** on `conv_in`
+ and the first two resnet convs. Verifier **PASS: 100/100 taps byte-identical** to a from-source
+ re-quantisation. **Two findings: (1) the locked per-output-column scheme, applied over the whole
+ layer, costs `up_blocks.{0,1}.upsamplers.0.time_conv` their Gate-1 cosine — 0.997397 / 0.997484,
+ 2 of 36 layers — while per-(channel, tap) scales bring the worst layer in the decoder to 0.999910
+ (measured side by side, not adopted); (2) bias stays FP32 and is flagged `quantised: false`,
+ because an INT32 bias is in `SA*SW` units and `SA` is `calibrate.py`'s output — nothing invented an
+ activation scale.** Mean relFro **2.000 %**. Nothing locked was touched.
+ **NEXT ACTION (device, one bounded run): `npu_block convseq` — walk `vae_int8.json`, one `CONV_2D`
+ per (layer, frame, tap) with int32 tap accumulation, and answer the fork first: does this HAL
+ accept `TENSOR_QUANT8_SYMM_PER_CHANNEL` for `CONV_2D` (it is rejected for `FULLY_CONNECTED`)? That
+ decides whether the decode can use the per-column scales at all, or is per-tensor like the FC
+ stage.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
