@@ -1,5 +1,30 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
+*Updated 2026-11-16 (08:16, **P3.14 — the decode's glue is localized and the temporal
+shuffle was WRONG: fixing it takes the device decode from 11.60 dB to 20.44 dB
+(+8.84 dB) for a one-line index change.** P3.13 named the instrument (a host program
+simulator); `tools/npu/vae_sim.py` is it, and it found the defect on its first walk.
+It runs `vae_wire.txt` op-for-op with the device's semantics — int8 codes at the declared
+per-tensor scales, the per-tap split with each tap rounded to int8 before the sum, the
+INT32 bias in accumulator units, the same `g = act.sa/sa_in` requant — from the dumped
+latent the device consumed, and diffs each conv against the fp32 reference's **own**
+module output (hooked, chunk-concatenated, asserted to the plan's 3/5/9 frames). Layers
+0–10 track at **0.965–0.996** (so `NORMSILU` and `ADD` are exonerated), then layer 12
+collapses to **0.717**. The mapping was then MEASURED off the reference's own `resample.1`
+conv input: frames are **[b0h0, b1h0, b1h1, b2h0, b2h1]** (0.896/0.977/0.972/0.970/0.963)
+where the wire emitted both halves of `b[0]` and dropped `b[T-1]`'s last half — same
+frame COUNT `2T-1`, so it failed silently, with no shape error and *better* saturation.
+Fix in `npu_block.cpp`: `t==0 ? (0,0) : ((t+1)/2, (t+1)%2)`. Measured: gather 0.6114 →
+**0.9536**, layer-12 conv 0.7172 → **0.9638**, device decode vs fp32 **(A) 11.60 dB /
+cos 0.2190 → 20.44 dB / 0.8967**, B 20.40/0.8946, C 20.42/0.8948. Device run
+`vae_wire_fix_20261116_080721`: 36/36 convs, 592/592 executes, `pc=1` on all 36, 0
+fallbacks, compile 18.81 s, wall 44.932 s, clamp 0.0149 → **0.0137 %**; MECHANISM-GRADE
+(TPU 24.0 vs gate 23.6, 0.4 °C over) so **no rate is claimed — `T_V`/`T_N`/`T_G`/`k_b*`
+untouched**. The same fix carries through the **second** upsample (layer 21: gather
+0.9445, conv 0.9488) and **no further collapse exists between layers 12 and 21** — the
+error now drifts 0.996 → 0.94 instead of stepping, i.e. what an accumulating scheme cost
+looks like. → `docs/device/RESULTS_vae_glue.md`, tool `tools/npu/vae_sim.py`.*
+
 *Updated 2026-11-16 (07:36, **P3.13 — the device decode has a quality number and it FAILS:
 11.60 dB / cosine 0.219 against the fp32 reference from the identical quantised latent. Two
 defects came out of it. (1) FOUND AND FIXED — the program's tap→frame labels were
@@ -582,6 +607,20 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  (`--dump-layer L`) to localize which GLUE op is wrong — the convs and the HAL are exonerated;
  (b) `post_quant_conv` is missing from the program (report, don't fold); (c) per-tap bias should be
  given to tap 0 only (recovers ~1 %/layer); then `proc_b --decode 1` → `convwire`, then Gate 5.**
+ **P3.14 DONE 08:16 — (a) is closed and it found a real defect, worth +8.84 dB** →
+ `docs/device/RESULTS_vae_glue.md`, tool `tools/npu/vae_sim.py`, device run
+ `vae_wire_fix_20261116_080721`, analysis `vae_psnr_fix_20261116_080912`. The temporal
+ upsample gather was wrong (`(t/2, t%2)` instead of "frame 0 = `b[0]` half 0 only, then
+ both halves of each later buffer frame"); the frame count is `2T-1` either way, so it was
+ silent. Device decode vs fp32: **11.60 dB / 0.2190 → 20.44 dB / 0.8967**. Layers 0–10
+ track the reference at 0.965–0.996, layer 21 (the second upsample) at 0.9488 ⇒ no second
+ structural defect; the rest is accumulating scheme cost.
+ **NEXT ACTION, in order: (a) score the three accumulating-scheme candidates with the
+ simulator, no device needed — the per-tap INT32 bias counted `kT` times (give tap 0 the
+ bias, zero the rest), the per-tap int8 rounding before the sum, and the missing
+ `post_quant_conv` (16→16 — needs the student's call if it edits the artifact); (b) the
+ layer-11/20 3-frame-vs-2-frame `time_conv` support; (c) then `proc_b --decode 1` →
+ `convwire`, and Gate 5.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)

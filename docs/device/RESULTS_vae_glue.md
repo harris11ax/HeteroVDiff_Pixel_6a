@@ -85,6 +85,24 @@ respect: **36/36 convs, 592/592 `CONV_2D` executes, `pc=1` on all 36, 0 fallback
 18.81 s, wall 44.932 s**, and the saturation **falls again** (0.0149 % → 0.0137 %
 overall). `conv_ms` 12,274.3 ms against the same-binary previous walk's 12,318.9 ms.
 
+## Result 4 — the second temporal upsample, scored: the same fix carries, and no further collapse
+
+`--shuffle shift --max-layer 21` (capture `vae_sim_l21_20261116_081109`) walks past the
+second upsample with the same gather, and the reference input/output now agree:
+
+| layer | module | cosine vs fp32 |
+|---|---|---|
+| 13 | `up_blocks.1.resnets.0.conv_shortcut` | 0.9680 |
+| 14–19 | `up_blocks.1.resnets.{0,1,2}.conv{1,2}` | 0.9391 … 0.9664 |
+| 20 | `up_blocks.1.upsamplers.0.time_conv` | (2-frame vs 3-frame shape, as layer 11) |
+| **21** | **`up_blocks.1.upsamplers.0.resample.1`** | **0.9488** (gather 0.9445) |
+
+So there is **no second structural defect between layers 12 and 21**: the error now drifts
+gradually (0.996 → 0.94) instead of collapsing at one op, which is what an accumulating
+scheme cost looks like — per-tap bias counted `kT` times (~1 % cosine per layer, P3.13),
+per-tap int8 rounding before the sum, and the missing `post_quant_conv`. Those are the
+next candidates, and the simulator prices each one without touching the phone.
+
 ## What is still wrong
 
 20.44 dB is not a decode: Gate 1's *simulation* of the same quantisation is 38.73 dB, so
