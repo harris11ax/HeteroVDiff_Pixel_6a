@@ -184,8 +184,9 @@
       "evidence": "docs/device/RESULTS_gate0.md (ZEROCOPY_VERIFY -> SHARED on AHB and file-mmap routes)"
     },
     "gate_3_thermal": {
-      "status": "pending",
-      "targets": "every timed run starts at max(SoC zone) <= ambient + 3 C"
+      "status": "partial - met on the table-grade captures, recorded as missed on the comparison-grade ones",
+      "targets": "every timed run starts at max(SoC zone) <= ambient + 3 C",
+      "evidence": "MET: T_N cool re-run 29.0 vs a 29.1 C gate; VAE conv sweep 32.0 vs 32.1; TPU attention sweep 26.0 vs 26.1; P3.5a 25.0 vs 25.3; P3.5 25.0 vs 25.5. MISSED and declared comparison-grade at the time: P3.2 0.3-0.9 C over, P3.3 'stage' 4.1 C over, P3.4 1.8/3.7 C over; the 24.6 s sustain soak started exactly on the line (25.0 = 25.0). The gate is a per-capture property that is being applied and reported honestly - it is not a single project pass/fail."
     },
     "gate_4_parity": {
       "status": "partial - GEMM-level cosine measured, frame-level PSNR/SSIM still pending",
@@ -194,8 +195,12 @@
       "not_measured": "full-block cosine over the composed 10-GEMM chain, and PSNR/SSIM on decoded frames (needs the quantiser + FP32 reference path)"
     },
     "gate_5_memory": {
-      "status": "pending",
-      "targets": "PSS(proc A) + PSS(proc B) < 2.2 GiB"
+      "status": "PASS - 0.27 GiB against a 2.2 GiB budget (8.2x headroom)",
+      "targets": "PSS(proc A) + PSS(proc B) < 2.2 GiB",
+      "evidence": "docs/device/RESULTS_gate4_p36.md + captures gate4_20261116_003217 / _003411 (2 chunks x 160 GPU blocks + 20 NPU, 1440/1440 executes, 0 fatal). PSS proc_a 246,873 kB median - one rw-s MAP_SHARED of the 46,399,488 B block at offset 0 with 10/10 windows imported by reference; proc_b 30,907 kB - one fd handed to createFromFd, zero mappings of its own. A+B peak 282,751 kB = 0.2697 GiB.",
+      "method_finding": "smaps_rollup reported 85,137 kB for proc_a where dumpsys reported 249,290 kB - a 2.93x UNDER-REPORT. The missing 164,153 kB is the 'GL mtrack' row: Mali driver CL memory that smaps never sees. proc_b, which has no GL mtrack, agrees between the two sources to 0.1% and is the control proving the gap is driver memory rather than a sampling artefact. Every future memory claim must come from dumpsys/GL mtrack: a smaps-only number would have passed this gate on 24% of the true footprint.",
+      "hygiene": "The first attempt FAILED honestly: the device still held a second 46,399,488 B copy of the block (hv_block_int8.bin, T_N era) plus stale weight scratch, all removed before the passing run; npu_block must re-push its blobs. NOTE the freed-byte figure does not reconcile - 46,399,488 + 128 MiB = 180,617,216 B, but the report quotes 137,502,720 B freed, which implies 86.9 MiB of scratch, not 128 MiB. One of those three numbers is wrong; re-measure before quoting it.",
+      "gate_numbering": "This is GATE 5 (memory). The commit title and the RESULTS file call it Gate 4 - the labels are swapped in the docs. Gate 3 = thermal, Gate 4 = parity, Gate 5 = memory; the same mix-up labels the outstanding parity work as 'Gate 3'."
     }
   },
   "repo": "https://github.com/harris11ax/HeteroVDiff_Pixel_6a (public)",
