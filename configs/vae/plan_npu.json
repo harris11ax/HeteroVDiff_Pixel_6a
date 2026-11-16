@@ -1,0 +1,2860 @@
+{
+  "kind": "vae_plan_npu",
+  "engine": "Tensor Edge TPU via NNAPI",
+  "preset_a_output_fhw": [
+    9,
+    272,
+    480
+  ],
+  "latent_fhw": [
+    3,
+    34,
+    60
+  ],
+  "constraints": {
+    "conv3d": "absent from NNAPI \u2014 every kT=3 causal conv becomes kT shifted CONV_2D taps",
+    "batch": "N=1 only: N>1 fails to compile above ~1 MB/frame (measured)",
+    "exactness": "exact under a 2-D tap; no seam"
+  },
+  "total_executes_per_chunk": 592,
+  "measured_total_ms": 10554.4,
+  "measured_source": "conv_sweep_20261115_182512.json (gate-compliant, TPU 32.0 C start) via docs/device/RESULTS_vae_tv.md",
+  "unmeasured": [
+    "decoder.mid_block.attentions.0 (3-D attention, 32.4 GMAC)",
+    "spatial resample convolutions are conv8_taps/conv2d of their own class"
+  ],
+  "layers": [
+    {
+      "name": "decoder.conv_in",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            55296
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            16,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            55296,
+            55296
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            16,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            110592,
+            55296
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            16,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 1015234560,
+      "measured_ms_per_chunk": 10.821000000000002,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.mid_block.resnets.0.conv1",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.mid_block.resnets.0.conv2",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.mid_block.resnets.1.conv1",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.mid_block.resnets.1.conv2",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.0.conv1",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.0.conv2",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.1.conv1",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.1.conv2",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.2.conv1",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.0.resnets.2.conv2",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 24365629440,
+      "measured_ms_per_chunk": 24.978,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.0.upsamplers.0.time_conv",
+      "frames": 3,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            294912
+          ],
+          "kernel": [
+            1,
+            1,
+            1
+          ],
+          "pad": [
+            "none",
+            "none"
+          ],
+          "conv2d": [
+            768,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            294912,
+            294912
+          ],
+          "kernel": [
+            1,
+            1,
+            1
+          ],
+          "pad": [
+            "none",
+            "none"
+          ],
+          "conv2d": [
+            768,
+            384,
+            34,
+            60
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            589824,
+            294912
+          ],
+          "kernel": [
+            1,
+            1,
+            1
+          ],
+          "pad": [
+            "none",
+            "none"
+          ],
+          "conv2d": [
+            768,
+            384,
+            34,
+            60
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 5414584320,
+      "measured_ms_per_chunk": 47.844,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.0.upsamplers.0.resample.1",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            663552
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            384,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 5,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 27072921600,
+      "measured_ms_per_chunk": 38.985,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.0.conv1",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            663552
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            192,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            663552,
+            663552
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            192,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            1327104,
+            663552
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            192,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 15,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 81218764800,
+      "measured_ms_per_chunk": 115.67999999999999,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.0.conv2",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 15,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 162437529600,
+      "measured_ms_per_chunk": 160.51500000000001,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.0.conv_shortcut",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            73728
+          ],
+          "kernel": [
+            1,
+            1,
+            1
+          ],
+          "pad": [
+            "none",
+            "none"
+          ],
+          "conv2d": [
+            384,
+            192,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 5,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 3008102400,
+      "measured_ms_per_chunk": 29.39,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.1.conv1",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 15,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 162437529600,
+      "measured_ms_per_chunk": 160.51500000000001,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.1.conv2",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 15,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 162437529600,
+      "measured_ms_per_chunk": 160.51500000000001,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.2.conv1",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 15,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 162437529600,
+      "measured_ms_per_chunk": 160.51500000000001,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.resnets.2.conv2",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            1327104,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            2654208,
+            1327104
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            384,
+            384,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 15,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 162437529600,
+      "measured_ms_per_chunk": 160.51500000000001,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.upsamplers.0.time_conv",
+      "frames": 5,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            294912
+          ],
+          "kernel": [
+            1,
+            1,
+            1
+          ],
+          "pad": [
+            "none",
+            "none"
+          ],
+          "conv2d": [
+            768,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            294912,
+            294912
+          ],
+          "kernel": [
+            1,
+            1,
+            1
+          ],
+          "pad": [
+            "none",
+            "none"
+          ],
+          "conv2d": [
+            768,
+            384,
+            68,
+            120
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            589824,
+            294912
+          ],
+          "kernel": [
+            1,
+            1,
+            1
+          ],
+          "pad": [
+            "none",
+            "none"
+          ],
+          "conv2d": [
+            768,
+            384,
+            68,
+            120
+          ]
+        }
+      ],
+      "executes": 15,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 36097228800,
+      "measured_ms_per_chunk": 175.425,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.1.upsamplers.0.resample.1",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            663552
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            384,
+            136,
+            240
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 194925035520,
+      "measured_ms_per_chunk": 287.343,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.0.conv1",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            331776,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            663552,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 508.464,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.0.conv2",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            331776,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            663552,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 508.464,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.1.conv1",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            331776,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            663552,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 508.464,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.1.conv2",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            331776,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            663552,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 508.464,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.2.conv1",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            331776,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            663552,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 508.464,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.2.resnets.2.conv2",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            331776,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            663552,
+            331776
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            192,
+            192,
+            136,
+            240
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 508.464,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.2.upsamplers.0.resample.1",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            165888
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            192,
+            272,
+            480
+          ]
+        }
+      ],
+      "executes": 9,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 194925035520,
+      "measured_ms_per_chunk": 434.889,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.0.conv1",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            82944,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            165888,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 813.159,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.0.conv2",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            82944,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            165888,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 813.159,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.1.conv1",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            82944,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            165888,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 813.159,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.1.conv2",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            82944,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            165888,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 813.159,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.2.conv1",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            82944,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            165888,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 813.159,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.up_blocks.3.resnets.2.conv2",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            82944,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            165888,
+            82944
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            96,
+            96,
+            272,
+            480
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 292387553280,
+      "measured_ms_per_chunk": 813.159,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    },
+    {
+      "name": "decoder.conv_out",
+      "frames": 9,
+      "taps": [
+        {
+          "tap": 0,
+          "input_frame": "f",
+          "weight_slice": [
+            0,
+            0,
+            2592
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            3,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 1,
+          "input_frame": "f-1",
+          "weight_slice": [
+            0,
+            2592,
+            2592
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            3,
+            96,
+            272,
+            480
+          ]
+        },
+        {
+          "tap": 2,
+          "input_frame": "f-2",
+          "weight_slice": [
+            0,
+            5184,
+            2592
+          ],
+          "kernel": [
+            1,
+            3,
+            3
+          ],
+          "pad": [
+            "same",
+            "same"
+          ],
+          "conv2d": [
+            3,
+            96,
+            272,
+            480
+          ]
+        }
+      ],
+      "executes": 27,
+      "batch": 1,
+      "accumulate": "int32 accumulate across the kT taps, then per-tensor dequant (epilogue)",
+      "macs": 9137111040,
+      "measured_ms_per_chunk": 431.919,
+      "compile_note": "one graph per (layer, tap) \u2014 a graph holding several ops risks the whole-block Compilation_finish reboot (RESULTS_npu_tn.md finding #1)"
+    }
+  ]
+}

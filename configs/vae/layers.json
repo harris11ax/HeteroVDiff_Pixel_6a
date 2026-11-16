@@ -1,0 +1,1909 @@
+{
+  "kind": "vae_decoder_layers",
+  "preset": "preset_a",
+  "source_checkpoint": "weights_raw\\DCM_WAN\\vae\\diffusion_pytorch_model.safetensors",
+  "walk": "module order; causal pad (kT-1,0); F'=2F-1 on temporal upsample; 2x nearest + 3x3 on spatial",
+  "totals": {
+    "layers": 37,
+    "convs": 36,
+    "attentions": 1,
+    "total_macs": 5149683302400,
+    "inventory_total_macs": 5149683302400,
+    "macs_match": true,
+    "npu_measured_total_ms": 10554.4,
+    "mali_measured_total_ms": 12256.2,
+    "npu_measured_total_s": 10.554,
+    "mali_measured_total_s": 12.256,
+    "reference_npu_s": 10.554,
+    "reference_mali_s": 12.256,
+    "output_fhw": [
+      9,
+      272,
+      480
+    ],
+    "output_ok": true
+  },
+  "layers": [
+    {
+      "idx": 0,
+      "name": "decoder.conv_in",
+      "kind": "conv3d",
+      "weight": "decoder.conv_in.weight",
+      "weight_shape": [
+        384,
+        16,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 165888,
+      "cin": 16,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 1015234560,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c16->384@6120",
+          "ms_per_conv2d": 3.607,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 10.821000000000002,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_16->384_34x60",
+          "ms": 2.957,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 8.9,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 1,
+      "name": "decoder.mid_block.attentions.0",
+      "kind": "attention",
+      "weight": "decoder.mid_block.attentions.0.to_qkv.weight",
+      "weight_shape": [
+        1152,
+        384,
+        1,
+        1
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "tokens": 6120,
+      "channels": 384,
+      "macs": 32374702080,
+      "temporal_cache_frames": 0,
+      "measured": null,
+      "measured_note": "no rate on either engine: 6120 tokens of 384-ch 3-D attention; 0.63 % of decode MACs, so T_V stays a lower bound until it is measured"
+    },
+    {
+      "idx": 2,
+      "name": "decoder.mid_block.resnets.0.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.mid_block.resnets.0.conv1.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 3,
+      "name": "decoder.mid_block.resnets.0.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.mid_block.resnets.0.conv2.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 4,
+      "name": "decoder.mid_block.resnets.1.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.mid_block.resnets.1.conv1.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 5,
+      "name": "decoder.mid_block.resnets.1.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.mid_block.resnets.1.conv2.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 6,
+      "name": "decoder.up_blocks.0.resnets.0.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.0.resnets.0.conv1.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 7,
+      "name": "decoder.up_blocks.0.resnets.0.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.0.resnets.0.conv2.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 8,
+      "name": "decoder.up_blocks.0.resnets.1.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.0.resnets.1.conv1.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 9,
+      "name": "decoder.up_blocks.0.resnets.1.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.0.resnets.1.conv2.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 10,
+      "name": "decoder.up_blocks.0.resnets.2.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.0.resnets.2.conv1.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 11,
+      "name": "decoder.up_blocks.0.resnets.2.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.0.resnets.2.conv2.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 24365629440,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@6120",
+          "ms_per_conv2d": 8.326,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 24.978,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_34x60",
+          "ms": 19.084,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 57.3,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 12,
+      "name": "decoder.up_blocks.0.upsamplers.0.time_conv",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.0.upsamplers.0.time_conv.weight",
+      "weight_shape": [
+        768,
+        384,
+        3,
+        1,
+        1
+      ],
+      "out_fhw": [
+        3,
+        34,
+        60
+      ],
+      "weight_bytes_if_int8": 884736,
+      "cin": 384,
+      "cout": 768,
+      "k": [
+        3,
+        1,
+        1
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 5414584320,
+      "upsample": {
+        "axis": "T",
+        "rule": "F' = 2F-1",
+        "kind": "3-tap causal time_conv then frame interleave"
+      },
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 1, 1)_c384->768@6120",
+          "ms_per_conv2d": 15.948,
+          "executes": 3,
+          "N": null,
+          "layer_ms": 47.844,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "tconv3x1_384->768_34x60",
+          "ms": 4.813,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 14.4,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 13,
+      "name": "decoder.up_blocks.0.upsamplers.0.resample.1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.0.upsamplers.0.resample.1.weight",
+      "weight_shape": [
+        192,
+        384,
+        3,
+        3
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 663552,
+      "cin": 384,
+      "cout": 192,
+      "k": [
+        1,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        0,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 0,
+      "macs": 27072921600,
+      "upsample": {
+        "axis": "HW",
+        "rule": "2x nearest then 3x3 conv",
+        "kind": "nearest+conv"
+      },
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3)_c384->192@40800",
+          "ms_per_conv2d": 7.797,
+          "executes": 5,
+          "N": null,
+          "layer_ms": 38.985,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3x3_384->192_68x120",
+          "ms": 12.949,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 64.7,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 14,
+      "name": "decoder.up_blocks.1.resnets.0.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.resnets.0.conv1.weight",
+      "weight_shape": [
+        384,
+        192,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 1990656,
+      "cin": 192,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 81218764800,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c192->384@40800",
+          "ms_per_conv2d": 7.712,
+          "executes": 15,
+          "N": null,
+          "layer_ms": 115.67999999999999,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_192->384_68x120",
+          "ms": 34.929,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 174.6,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 15,
+      "name": "decoder.up_blocks.1.resnets.0.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.resnets.0.conv2.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 162437529600,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@40800",
+          "ms_per_conv2d": 10.701,
+          "executes": 15,
+          "N": null,
+          "layer_ms": 160.51500000000001,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_68x120",
+          "ms": 68.167,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 340.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 16,
+      "name": "decoder.up_blocks.1.resnets.0.conv_shortcut",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.resnets.0.conv_shortcut.weight",
+      "weight_shape": [
+        384,
+        192,
+        1,
+        1,
+        1
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 73728,
+      "cin": 192,
+      "cout": 384,
+      "k": [
+        1,
+        1,
+        1
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        0,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 0,
+      "macs": 3008102400,
+      "measured": {
+        "tpu": {
+          "class": "conv(1, 1, 1)_c192->384@40800",
+          "ms_per_conv2d": 5.878,
+          "executes": 5,
+          "N": null,
+          "layer_ms": 29.39,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv1x1_192->384_68x120",
+          "ms": 3.569,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 17.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 17,
+      "name": "decoder.up_blocks.1.resnets.1.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.resnets.1.conv1.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 162437529600,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@40800",
+          "ms_per_conv2d": 10.701,
+          "executes": 15,
+          "N": null,
+          "layer_ms": 160.51500000000001,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_68x120",
+          "ms": 68.167,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 340.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 18,
+      "name": "decoder.up_blocks.1.resnets.1.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.resnets.1.conv2.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 162437529600,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@40800",
+          "ms_per_conv2d": 10.701,
+          "executes": 15,
+          "N": null,
+          "layer_ms": 160.51500000000001,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_68x120",
+          "ms": 68.167,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 340.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 19,
+      "name": "decoder.up_blocks.1.resnets.2.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.resnets.2.conv1.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 162437529600,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@40800",
+          "ms_per_conv2d": 10.701,
+          "executes": 15,
+          "N": null,
+          "layer_ms": 160.51500000000001,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_68x120",
+          "ms": 68.167,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 340.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 20,
+      "name": "decoder.up_blocks.1.resnets.2.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.resnets.2.conv2.weight",
+      "weight_shape": [
+        384,
+        384,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 3981312,
+      "cin": 384,
+      "cout": 384,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 162437529600,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c384->384@40800",
+          "ms_per_conv2d": 10.701,
+          "executes": 15,
+          "N": null,
+          "layer_ms": 160.51500000000001,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_384->384_68x120",
+          "ms": 68.167,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 340.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 21,
+      "name": "decoder.up_blocks.1.upsamplers.0.time_conv",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.upsamplers.0.time_conv.weight",
+      "weight_shape": [
+        768,
+        384,
+        3,
+        1,
+        1
+      ],
+      "out_fhw": [
+        5,
+        68,
+        120
+      ],
+      "weight_bytes_if_int8": 884736,
+      "cin": 384,
+      "cout": 768,
+      "k": [
+        3,
+        1,
+        1
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 36097228800,
+      "upsample": {
+        "axis": "T",
+        "rule": "F' = 2F-1",
+        "kind": "3-tap causal time_conv then frame interleave"
+      },
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 1, 1)_c384->768@40800",
+          "ms_per_conv2d": 11.695,
+          "executes": 15,
+          "N": null,
+          "layer_ms": 175.425,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "tconv3x1_384->768_68x120",
+          "ms": 17.357,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 86.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 22,
+      "name": "decoder.up_blocks.1.upsamplers.0.resample.1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.1.upsamplers.0.resample.1.weight",
+      "weight_shape": [
+        192,
+        384,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        136,
+        240
+      ],
+      "weight_bytes_if_int8": 663552,
+      "cin": 384,
+      "cout": 192,
+      "k": [
+        1,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        0,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 0,
+      "macs": 194925035520,
+      "upsample": {
+        "axis": "HW",
+        "rule": "2x nearest then 3x3 conv",
+        "kind": "nearest+conv"
+      },
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3)_c384->192@293760",
+          "ms_per_conv2d": 31.927,
+          "executes": 9,
+          "N": null,
+          "layer_ms": 287.343,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3x3_384->192_136x240",
+          "ms": 51.318,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 461.9,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 23,
+      "name": "decoder.up_blocks.2.resnets.0.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.2.resnets.0.conv1.weight",
+      "weight_shape": [
+        192,
+        192,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        136,
+        240
+      ],
+      "weight_bytes_if_int8": 995328,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c192->192@293760",
+          "ms_per_conv2d": 18.832,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 508.464,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_192->192_136x240",
+          "ms": 66.865,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 601.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 24,
+      "name": "decoder.up_blocks.2.resnets.0.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.2.resnets.0.conv2.weight",
+      "weight_shape": [
+        192,
+        192,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        136,
+        240
+      ],
+      "weight_bytes_if_int8": 995328,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c192->192@293760",
+          "ms_per_conv2d": 18.832,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 508.464,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_192->192_136x240",
+          "ms": 66.865,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 601.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 25,
+      "name": "decoder.up_blocks.2.resnets.1.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.2.resnets.1.conv1.weight",
+      "weight_shape": [
+        192,
+        192,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        136,
+        240
+      ],
+      "weight_bytes_if_int8": 995328,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c192->192@293760",
+          "ms_per_conv2d": 18.832,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 508.464,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_192->192_136x240",
+          "ms": 66.865,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 601.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 26,
+      "name": "decoder.up_blocks.2.resnets.1.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.2.resnets.1.conv2.weight",
+      "weight_shape": [
+        192,
+        192,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        136,
+        240
+      ],
+      "weight_bytes_if_int8": 995328,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c192->192@293760",
+          "ms_per_conv2d": 18.832,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 508.464,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_192->192_136x240",
+          "ms": 66.865,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 601.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 27,
+      "name": "decoder.up_blocks.2.resnets.2.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.2.resnets.2.conv1.weight",
+      "weight_shape": [
+        192,
+        192,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        136,
+        240
+      ],
+      "weight_bytes_if_int8": 995328,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c192->192@293760",
+          "ms_per_conv2d": 18.832,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 508.464,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_192->192_136x240",
+          "ms": 66.865,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 601.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 28,
+      "name": "decoder.up_blocks.2.resnets.2.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.2.resnets.2.conv2.weight",
+      "weight_shape": [
+        192,
+        192,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        136,
+        240
+      ],
+      "weight_bytes_if_int8": 995328,
+      "cin": 192,
+      "cout": 192,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c192->192@293760",
+          "ms_per_conv2d": 18.832,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 508.464,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_192->192_136x240",
+          "ms": 66.865,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 601.8,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 29,
+      "name": "decoder.up_blocks.2.upsamplers.0.resample.1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.2.upsamplers.0.resample.1.weight",
+      "weight_shape": [
+        96,
+        192,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        272,
+        480
+      ],
+      "weight_bytes_if_int8": 165888,
+      "cin": 192,
+      "cout": 96,
+      "k": [
+        1,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        0,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 0,
+      "macs": 194925035520,
+      "upsample": {
+        "axis": "HW",
+        "rule": "2x nearest then 3x3 conv",
+        "kind": "nearest+conv"
+      },
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3)_c192->96@1175040",
+          "ms_per_conv2d": 48.321,
+          "executes": 9,
+          "N": null,
+          "layer_ms": 434.889,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3x3_192->96_272x480",
+          "ms": 57.634,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 518.7,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 30,
+      "name": "decoder.up_blocks.3.resnets.0.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.3.resnets.0.conv1.weight",
+      "weight_shape": [
+        96,
+        96,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        272,
+        480
+      ],
+      "weight_bytes_if_int8": 248832,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c96->96@1175040",
+          "ms_per_conv2d": 30.117,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 813.159,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_96->96_272x480",
+          "ms": 85.84,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 772.6,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 31,
+      "name": "decoder.up_blocks.3.resnets.0.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.3.resnets.0.conv2.weight",
+      "weight_shape": [
+        96,
+        96,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        272,
+        480
+      ],
+      "weight_bytes_if_int8": 248832,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c96->96@1175040",
+          "ms_per_conv2d": 30.117,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 813.159,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_96->96_272x480",
+          "ms": 85.84,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 772.6,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 32,
+      "name": "decoder.up_blocks.3.resnets.1.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.3.resnets.1.conv1.weight",
+      "weight_shape": [
+        96,
+        96,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        272,
+        480
+      ],
+      "weight_bytes_if_int8": 248832,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c96->96@1175040",
+          "ms_per_conv2d": 30.117,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 813.159,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_96->96_272x480",
+          "ms": 85.84,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 772.6,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 33,
+      "name": "decoder.up_blocks.3.resnets.1.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.3.resnets.1.conv2.weight",
+      "weight_shape": [
+        96,
+        96,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        272,
+        480
+      ],
+      "weight_bytes_if_int8": 248832,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c96->96@1175040",
+          "ms_per_conv2d": 30.117,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 813.159,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_96->96_272x480",
+          "ms": 85.84,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 772.6,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 34,
+      "name": "decoder.up_blocks.3.resnets.2.conv1",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.3.resnets.2.conv1.weight",
+      "weight_shape": [
+        96,
+        96,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        272,
+        480
+      ],
+      "weight_bytes_if_int8": 248832,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c96->96@1175040",
+          "ms_per_conv2d": 30.117,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 813.159,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_96->96_272x480",
+          "ms": 85.84,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 772.6,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 35,
+      "name": "decoder.up_blocks.3.resnets.2.conv2",
+      "kind": "conv3d",
+      "weight": "decoder.up_blocks.3.resnets.2.conv2.weight",
+      "weight_shape": [
+        96,
+        96,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        272,
+        480
+      ],
+      "weight_bytes_if_int8": 248832,
+      "cin": 96,
+      "cout": 96,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 292387553280,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c96->96@1175040",
+          "ms_per_conv2d": 30.117,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 813.159,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_96->96_272x480",
+          "ms": 85.84,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 772.6,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    },
+    {
+      "idx": 36,
+      "name": "decoder.conv_out",
+      "kind": "conv3d",
+      "weight": "decoder.conv_out.weight",
+      "weight_shape": [
+        3,
+        96,
+        3,
+        3,
+        3
+      ],
+      "out_fhw": [
+        9,
+        272,
+        480
+      ],
+      "weight_bytes_if_int8": 7776,
+      "cin": 96,
+      "cout": 3,
+      "k": [
+        3,
+        3,
+        3
+      ],
+      "stride": 1,
+      "causal_pad_T": [
+        2,
+        0
+      ],
+      "causal_note": "taps read frames f, f-1, ... f-(kT-1); F_out == F_in at every layer",
+      "temporal_cache_frames": 2,
+      "macs": 9137111040,
+      "measured": {
+        "tpu": {
+          "class": "conv(3, 3, 3)_c96->3@1175040",
+          "ms_per_conv2d": 15.997,
+          "executes": 27,
+          "N": null,
+          "layer_ms": 431.919,
+          "source": "conv_sweep_20261115_182512.json"
+        },
+        "mali": {
+          "class": "conv3^3_96->3_272x480",
+          "ms": 42.783,
+          "dispatching": "one conv8_taps dispatch covering every tap",
+          "layer_ms": 385.0,
+          "source": "gemm_mali_20261115_190925.json"
+        }
+      }
+    }
+  ]
+}

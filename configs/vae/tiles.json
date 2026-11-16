@@ -1,0 +1,60 @@
+{
+  "kind": "vae_tile_schedule",
+  "latent_fhw": [
+    3,
+    34,
+    60
+  ],
+  "latent_pixels": 6120,
+  "spec_tile_latent_pixels": 2400,
+  "spec_tile_note": "docs/05_phase_plans.md asks for a 60x40-latent-pixel tile schedule; the Preset-A latent plane is 34x60 = 2040 pixels < 2400, so the schedule degenerates to ONE tile \u2014 no seams",
+  "tiles": 1,
+  "per_frame_executes": {
+    "tpu": 592,
+    "mali": 216
+  },
+  "halo": {
+    "spatial_px": 1,
+    "temporal_frames": 2,
+    "note": "kH=kW=3 needs a 1-pixel halo; kT=3 needs 2 previous input frames (causal)"
+  },
+  "levels": [
+    {
+      "name": "latent",
+      "fhw": [
+        3,
+        34,
+        60
+      ],
+      "tiles": 1
+    },
+    {
+      "name": "after up_blocks.0",
+      "fhw": [
+        5,
+        68,
+        120
+      ],
+      "tiles": 1
+    },
+    {
+      "name": "after up_blocks.1",
+      "fhw": [
+        9,
+        136,
+        240
+      ],
+      "tiles": 1
+    },
+    {
+      "name": "after up_blocks.2",
+      "fhw": [
+        9,
+        272,
+        480
+      ],
+      "tiles": 1
+    }
+  ],
+  "chunk_stream": "each chunk's decode is independent of the previous chunk's frames (the DiT side carries the trajectory); the temporal cache is only within-chunk, so no cross-chunk VAE state is needed"
+}

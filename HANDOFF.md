@@ -111,8 +111,21 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    30 per-block `scale_shift_table` (276,480 params) while still printing PASS — classification is
    now by role, with a coverage assertion in both scripts.
    **Still open in Gate 1:** (a) the end-to-end FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg —
-   blocked, this host has no torch/diffusers; (b) deliverables 2–4 (`expert_factors.py` — expects
-   240,089,216 B FP16, `vae_export.py`, `calibrate.py`) are not written.
+   blocked, this host has no torch/diffusers; (b) `calibrate.py` (deliverable 4) — same blocker, it
+   has to *run* the FP32 forward pass to record `max|x|/127` per (step, block, GEMM).
+   **Done 2026-11-15 20:5x, host only** → `docs/device/RESULTS_phase1_artifacts.md`:
+   deliverable 2 `phase1_quant/expert_factors.py` (`artifacts/experts/detail/`, **240,089,216 B FP16,
+   delta 0** vs Gate 1; 492 tensors = 30 × 16 LoRA + 12 timestep; FP16 worst relF 0.0220 %; writing
+   0 INT8 bytes and asserting disjointness with the 300 base GEMMs, so the one-copy rule holds;
+   `routing.json` = 180 block executions, semantic×3 + detail×3) with an independent verifier
+   `phase1_quant/verify_experts.py` (re-implements the classifier, re-derives every byte → PASS);
+   and deliverable 3 `phase1_quant/vae_export.py` → `configs/vae/{layers,plan_npu,plan_mali,
+   scaling,tiles}.json` (37 ops, 5149.68 GMAC **MATCH** vs `vae_decode_ops.json`; binding the measured
+   per-class rates back in reproduces **10.554 s** TPU / **12.256 s** Mali exactly; 592 CONV_2D
+   executes vs 216 `conv8_taps` dispatches). Two facts recorded there, not fixed: `lora.scaling_alpha`
+   is **null** (no alpha tensor exists in the checkpoint — copy it from the reference repo, do not
+   guess), and the spec's 60×40-latent-pixel tile **degenerates to one tile** at Preset A (latent
+   plane is 34×60).
 8. Mid-block VAE attention (32.4 GMAC) is the last unmeasured rate; it is the only thing keeping `T_V`
    a lower bound. Needs a GEMM rate at 6120 tokens × 384 ch on both engines.
 9. Phase 3 executors, Phase 4 tables, report.
