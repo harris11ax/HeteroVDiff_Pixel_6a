@@ -119,3 +119,74 @@ idle floor sits between two steps — the case `tools/npu/cool_rerun.py` documen
 **TPU 26.0 · skin1 24.0 · skin2 24.4 · VIRTUAL-SKIN 23.8 · battery 22.5** (gate line 25.5, i.e.
 **0.5 °C over** at the floor, floor-grade and stated) and the 12.6 s run moved the TPU zone
 26.0 → 33.0 °C. No drift term applies inside a 0.72 s stage.
+
+---
+
+## P3.7e — the pass-major binary is exact *and* 9.7 % cheaper (capture `tn_recipe_20261116_023152`)
+
+P3.7c's 448/448 parity dump was taken with the **gemm-major** `run_recipe` (each GEMM freed its
+slots before the next compiled). P3.7d rewrote it **pass-major** — all 56 graphs compiled up front,
+then each pass walks the block — so a pass is contiguous in time and can be classified solo vs
+contended. Parity under that binary had not been re-checked. It has now.
+
+| quantity | gemm-major (P3.7c) | **pass-major (P3.7e)** |
+|---|---|---|
+| block, steady (passes 2…5) | 716.4 ms | **646.69 ms** median (646.4 / 646.7 / 646.7 / 647.0, stdev **0.21 ms = 0.03 %**) |
+| block, pass 1 (cold) | 777–815 ms | 668.5 ms |
+| ratio vs the 377.8 ms 9-graph stage | 1.90× | **1.71×** |
+| GOPS over 50.13 GMAC | 140 | **155** |
+| compilations (wall) | 56 (8.64 s) | 56 (**9.63 s**) |
+| dumped tiles bit-exact | 448/448 (Δ = 0) | **448/448 (Δ = 0 LSB, worst 0)** |
+
+So the pass-major rewrite is not only a *classification* device: holding all 56 graphs at once
+removes the per-GEMM compile gaps that P3.7c paid **inside** every pass, and buys **9.7 %** off the
+block. Compile grows 8.64 → 9.63 s (all 56 resident, matching P3.7d's 9.57 s).
+
+Gate: TPU **27.0** · skin1 24.6 · skin2 25.2 · VIRTUAL-SKIN 24.4 · battery 23.2 → gate **27.2**,
+**PASS at start** (whole-degree TPU sensor, 1.0 °C slack as `cool_rerun.py` documents). After the
+13.2 s run: TPU **34.0**.
+
+### The number that does not fit — reported, not resolved
+
+P3.7d priced contention as a non-event by comparing **700.5 ms contended** against **707.0 ms** in
+"the passes before the GPU joined". Tonight's clean solo pass-major run is **646.7 ms** — i.e. both
+of P3.7d's numbers sit ~9 % *above* a floor-started solo run, and they bracket it from either side.
+Consequences, stated as candidates with the measurement that would separate them:
+
+- **(i) thermal.** The co_run's later passes ran with the TPU zone climbing to **45 °C** (it ended
+  there), while this run spanned 27 → 34 °C. The 9-GEMM soak showed **+0.35 %** drift over 25 → 31 °C,
+  so a derate above ~34 °C would be **new** for the recipe — plausible (56 compiles + 448 executes
+  per block touch the HAL far more often) but not measured.
+- **(ii) order/state.** The co_run had just finished the GPU's 8 solo blocks when pass 1 started
+  (CL allocations live, 46 MB of weight pages competing). The first four passes there
+  (719.95 / 708.35 / 709.63 / 710.96) never fell to 647 even though the device was *cooler*
+  at start (TPU 26.0) than tonight's — which thermal does not explain on its own.
+
+**What this run does not do is claim contention is 8 %.** It removes the evidence for "contention is
+a non-event" from the table and names the run that settles it: a **floor-started co_recipe** whose
+crossing passes can be compared to 646.7 ms rather than to a 707 ms baseline taken above the floor.
+
+### Cut, re-solved on both candidates (reported, not applied — lock untouched)
+
+`T_N` = recipe + `ffn.down` downsep 0.2580 s (**still solo**):
+
+| `T_N` candidate | `T_N` | `k_b*` | period | vs locked 160 / 23.61 s |
+|---|---|---|---|---|
+| 0.6467 solo (this run) | **0.9047 s** | **165** | **24.32 s** | reported |
+| 0.7005 contended (P3.7d) | 0.9591 s | 166 | 24.47 s | reported |
+
+The cut is insensitive to which of the two you believe (**165 vs 166**, 0.6 % in period) — the
+lock-breaking question is not this number.
+
+### Two host-side defects fixed en route (they silently blocked the run)
+
+1. **`run(["bash", …])` resolved to WSL bash, not git-bash.** `subprocess` searches `System32`
+   before `PATH`, so the build never ran: `/bin/bash: C:/…/build.sh: No such file or directory`
+   (rc 127, `--build` returned 2 before touching the phone). WSL mounts the repo at `/mnt/c`, so
+   neither `C:/…` nor `/c/…` resolves. Fixed in `tools/probe/probe_host.py::run()` — a `bash`/`sh`
+   argv[0] is now resolved through `bash_bin()` (git-bash, `GIT_BASH` overridable) with forward-slash
+   arguments. Every tool in the repo inherits the fix.
+2. **A single confirm sample aborted a floor-grade run.** TPU reads 27.0 (PASS, gate 27.4), then
+   28.4 on the 8 s confirm at an unchanged battery → `NO TIMED RUN`. `gate_wait` now returns to the
+   wait loop on a failed confirm instead of failing the gate (still bounded by `--max-wait`); the
+   device passed 53 s later at 27.0 with no cooling applied.

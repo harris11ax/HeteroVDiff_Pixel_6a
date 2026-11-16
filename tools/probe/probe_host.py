@@ -35,6 +35,13 @@ REMOTE = "/data/local/tmp/hv_probe"
 
 
 def run(cmd: list[str] | str, timeout: int = 120, shell: bool = False) -> tuple[int, str]:
+    if isinstance(cmd, list) and cmd:
+        # `subprocess` searches System32 before PATH, so a bare "bash" resolves to
+        # WSL's bash, which mounts this repo at /mnt/c and cannot open a C:/ path
+        # (rc 127, "No such file or directory" — the build never runs). Route every
+        # shell-script invocation through the MSYS bash instead.
+        if str(cmd[0]).lower() in ("bash", "bash.exe", "sh", "sh.exe"):
+            cmd = [bash_bin()] + [str(c).replace("\\", "/") for c in cmd[1:]]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=shell)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
@@ -42,6 +49,28 @@ def run(cmd: list[str] | str, timeout: int = 120, shell: bool = False) -> tuple[
         return 124, "<timeout>"
     except FileNotFoundError as e:
         return 127, f"<missing: {e}>"
+
+
+def bash_bin() -> str:
+    """A real MSYS bash, not WSL's.
+
+    `subprocess.run(["bash", ...])` searches System32 *before* PATH, so on this
+    host it picks up `C:\\Windows\\System32\\bash.exe` (WSL). WSL mounts the repo
+    at `/mnt/c/...`, so a `C:/.../build.sh` argument comes back as
+    `/bin/bash: C:/...: No such file or directory` (rc 127) — the build silently
+    never runs. Resolve git-bash explicitly instead.
+    """
+    for c in (os.environ.get("GIT_BASH"),
+              r"C:/Program Files/Git/usr/bin/bash.exe",
+              r"C:/Program Files/Git/bin/bash.exe"):
+        if c and os.path.exists(c):
+            return c
+    return shutil.which("bash") or "bash"
+
+
+def run_script(script: Path | str, timeout: int = 900) -> tuple[int, str]:
+    """Run a POSIX shell script under the MSYS bash, with a portable path."""
+    return run([bash_bin(), str(script).replace("\\", "/")], timeout=timeout)
 
 
 def adb(serial: str | None, args: str, timeout: int = 120) -> tuple[int, str]:

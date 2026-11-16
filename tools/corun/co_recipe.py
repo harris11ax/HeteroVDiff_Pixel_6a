@@ -277,7 +277,7 @@ def main() -> int:
         if args.build or not (GEMM_BIN.exists() and PIPE_BIN.exists()):
             for d in (GEMM_DIR, PIPE_DIR):
                 print(f"building {d.name} ...")
-                rc, txt = run(["bash", str(d / "build.sh")], timeout=900)
+                rc, txt = run(["bash", (d / "build.sh").as_posix()], timeout=900)
                 if rc != 0:
                     print(txt[-3000:], file=sys.stderr)
                     return 2

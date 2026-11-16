@@ -37,3 +37,6 @@ docs/device/.conv_tv.log
 tools/corun/corun_device.lf.sh
 tools/corun/co_recipe_device.lf.sh
 .venv-ref/
+
+# host-side run logs (scratch, never committed)
+docs/device/_*.log

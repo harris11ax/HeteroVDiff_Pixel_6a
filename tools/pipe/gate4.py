@@ -267,7 +267,7 @@ def main() -> int:
     bins = {"a": PIPE_DIR / "build" / "proc_a", "b": PIPE_DIR / "build" / "proc_b"}
     if not all(p.exists() for p in bins.values()):
         print("building pipe binaries ...")
-        rc, txt = run(["bash", str(PIPE_DIR / "build.sh")], timeout=900)
+        rc, txt = run(["bash", (PIPE_DIR / "build.sh").as_posix()], timeout=900)
         if rc != 0:
             print(txt[-3000:], file=sys.stderr)
             return 2

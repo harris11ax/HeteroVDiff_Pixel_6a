@@ -219,7 +219,7 @@ def main() -> int:
 
     if args.build:
         print("building gemm_bench ...")
-        rc, txt = run(["bash", str(GEMM_DIR / "build.sh")], timeout=900)
+        rc, txt = run(["bash", (GEMM_DIR / "build.sh").as_posix()], timeout=900)
         print(txt[-1500:])
         if rc != 0:
             return rc

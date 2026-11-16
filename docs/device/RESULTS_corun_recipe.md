@@ -10,6 +10,16 @@ that number is **solo**, while the locked `T_N` (0.6484 s) and `T_G` (0.1474 s) 
 numbers. A cut argument may not mix the two. This run times both engines together and answers one
 question: what does the exact recipe cost **while the GPU is executing a Preset-A block**.
 
+> **⚠ Superseded on one point — read `RESULTS_tn_recipe.md` §P3.7e before quoting the −0.9 %.**
+> A floor-started solo run of the same pass-major binary measures **646.7 ms/block** (2026-11-16
+> 02:31, capture `tn_recipe_20261116_023152`, TPU 27.0 °C, stdev 0.03 %). This run's 707.0 "solo"
+> and 700.5 "contended" therefore both sit **~9 % above** a floor-started solo block and bracket it,
+> so the "contention is not measurable" reading below is **not established**. Untested candidates:
+> a TPU derate above ~34 °C (this run ended at TPU 45 °C) or order/state (the four pre-GPU passes
+> read 708–720 at a *cooler* 26.0 °C start). The pass-major rewrite, the overlap proof, the GPU
+> `146.05` vs `160.27` ms pair and the exactness chain are unaffected. What settles it: a
+> **floor-started** `co_recipe` run whose crossing passes are compared to 646.7 ms.
+
 ## The one code change that made the measurement possible
 
 `run_recipe` used to be **gemm-major** (for each GEMM: all passes). A "pass" then spanned the whole

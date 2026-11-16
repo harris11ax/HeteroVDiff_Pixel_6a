@@ -138,33 +138,49 @@ def zone_line(z: dict) -> str:
 
 
 def gate_wait(serial: str, slack: float, max_wait: float, poll: float, confirm: int) -> tuple[bool, dict]:
-    """Block until max(TPU, skin, VIRTUAL-SKIN) <= battery + 3 + slack."""
+    """Block until max(TPU, skin, VIRTUAL-SKIN) <= battery + 3 + slack.
+
+    The TPU zone reports in whole degrees, so a *confirm* sample can land on the
+    next step up while the device has not moved. Aborting the run on that single
+    sample wasted a floor-grade device (observed 2026-11-16: peak 27.0 PASS, then
+    28.4 on the confirm at an unchanged battery). A failed confirm now returns to
+    the wait loop instead of failing the gate, still bounded by `max_wait`.
+    """
     t0 = time.time()
     while True:
-        z = read_zones(serial)
-        peak = max((v for k, v in z.items() if k in GATE_KEYS), default=None)
-        batt = z.get("battery")
-        if peak is None or batt is None:
-            print("  [gate] zones unreadable — refusing a timed run")
-            return False, z
-        gate = batt + 3.0 + slack
-        el = int(time.time() - t0)
-        print(f"  [gate {el:4d}s] peak={peak:.1f} gate={gate:.1f}  ({zone_line(z)})")
-        if peak <= gate:
-            break
+        while True:                      # 1) wait for a passing sample
+            z = read_zones(serial)
+            peak = max((v for k, v in z.items() if k in GATE_KEYS), default=None)
+            batt = z.get("battery")
+            if peak is None or batt is None:
+                print("  [gate] zones unreadable — refusing a timed run")
+                return False, z
+            gate = batt + 3.0 + slack
+            el = int(time.time() - t0)
+            print(f"  [gate {el:4d}s] peak={peak:.1f} gate={gate:.1f}  ({zone_line(z)})")
+            if peak <= gate:
+                break
+            if time.time() - t0 > max_wait:
+                print(f"  [gate] gave up after {el}s: peak {peak:.1f} > gate {gate:.1f}")
+                return False, z
+            time.sleep(poll)
+        ok = True                       # 2) confirm on fresh samples
+        for i in range(max(1, confirm)):
+            time.sleep(8)
+            z = read_zones(serial)
+            peak = max((v for k, v in z.items() if k in GATE_KEYS), default=None)
+            gate = (z.get("battery") or 99) + 3.0 + slack
+            print(f"  [gate confirm {i+1}/{max(1, confirm)}] peak={peak:.1f} gate={gate:.1f}")
+            if peak is None or peak > gate:
+                ok = False
+                break
+        if ok:
+            return True, z
         if time.time() - t0 > max_wait:
-            print(f"  [gate] gave up after {el}s: peak {peak:.1f} > gate {gate:.1f}")
+            print("  [gate] confirm kept stepping over the gate; giving up")
             return False, z
+        print("  [gate] confirm stepped over the gate — back to waiting (device did not move)")
         time.sleep(poll)
-    for i in range(max(1, confirm)):
-        time.sleep(8)
-        z = read_zones(serial)
-        peak = max((v for k, v in z.items() if k in GATE_KEYS), default=None)
-        gate = (z.get("battery") or 99) + 3.0 + slack
-        print(f"  [gate confirm {i+1}/{max(1, confirm)}] peak={peak:.1f} gate={gate:.1f}")
-        if peak is None or peak > gate:
-            return False, z
-    return True, z
 
 
 def main() -> int:
@@ -207,7 +223,7 @@ def main() -> int:
     else:
         if args.build or not PIPE_BIN.exists():
             print("building proc_b ...")
-            rc, txt = run(["bash", str(PIPE_DIR / "build.sh")], timeout=900)
+            rc, txt = run(["bash", (PIPE_DIR / "build.sh").as_posix()], timeout=900)
             if rc != 0:
                 print(txt[-3000:], file=sys.stderr)
                 return 2

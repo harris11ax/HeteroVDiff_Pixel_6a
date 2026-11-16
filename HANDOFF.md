@@ -1,7 +1,7 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (01:36, **P3.7c — the bit-exact NPU stage is measured: 0.7164 s/block, and it
-is exact at 448/448 tiles**). This
+*Updated 2026-11-16 (02:31, **P3.7e — the pass-major recipe is exact at 448/448 tiles *and* 9.7 %
+cheaper: 646.7 ms/block, and P3.7d's "contention is a non-event" does not survive it**). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
 `docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
@@ -293,10 +293,31 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    not applied. Required a **pass-major** rewrite of `run_recipe` (all 56 graphs compiled up
    front, then each pass walks the block) so that a pass is contiguous in time and can be
    classified solo vs contended. **NEXT ACTION: (a) re-run `python tools/pipe/tn_recipe.py --dump`
-   to re-establish 448/448 exactness under the pass-major binary; (b) the exact stage's
-   `ffn.down` under contention (the 0.2580 s downsep is still solo); (c) then the real
-   Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's PSNR/SSIM leg and
-   `calibrate.py` are the host-only work, and Gate 5 is unrun.**
+ to re-establish 448/448 exactness under the pass-major binary; (b) the exact stage's
+ `ffn.down` under contention (the 0.2580 s downsep is still solo); (c) then the real
+ Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's PSNR/SSIM leg and
+ `calibrate.py` are the host-only work, and Gate 5 is unrun.**
+ **P3.7e DONE 2026-11-16 02:31 — (a) closed, and it moved the number** →
+ `docs/device/RESULTS_tn_recipe.md` §P3.7e, capture `tn_recipe_20261116_023152` (gate PASS,
+ TPU 27.0 vs 27.2): **448/448 tiles bit-exact (Δ = 0 LSB)** under the pass-major binary, and the
+ block costs **646.69 ms** steady (646.4/646.7/646.7/647.0, stdev **0.21 ms = 0.03 %**), pass 1
+ 668.5 ms, compile 9.63 s, **155 GOPS**, **1.71×** the 377.8 ms 9-graph stage — i.e. pass-major is
+ **9.7 % cheaper** than P3.7c's gemm-major 716.4 ms, not merely classifiable. **The confound:
+ P3.7d's 707.0 "solo" / 700.5 "contended" both sit ~9 % above a floor-started solo run and bracket
+ it, so "contention is a non-event (−0.9 %)" is not established** — candidates are a TPU derate
+ above ~34 °C (the co_run reached 45 °C; the 9-GEMM soak saw +0.35 % only over 25→31 °C) or
+ order/state (the co_run's 4 pre-GPU passes read 708–720 at a *cooler* start). `T_N` = 0.6467 +
+ 0.2580 downsep = **0.9047 s ⇒ `k_b*` = 165, 24.32 s**; the contended candidate (0.9591 s) gives
+ 166 / 24.47 s — the **cut is insensitive (165 vs 166)**, both reported, lock untouched.
+ Two host defects fixed en route: `run(["bash", …])` resolved to **WSL bash** (subprocess searches
+ System32 before PATH ⇒ the build silently never ran, rc 127), now routed through
+ `probe_host.bash_bin()` for every tool; and a single confirm sample no longer aborts a floor-grade
+ run (it re-enters the wait loop).
+ **NEXT ACTION: (a) a floor-started `tools/corun/co_recipe.py` run — the only measurement that
+ separates contention from thermal/order for the exact recipe (compare its crossing passes to
+ 646.7 ms, not to 707); (b) `ffn.down` under contention (0.2580 s downsep still solo); (c) the real
+ Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's PSNR/SSIM leg and `calibrate.py`
+ are the host-only work, Gate 5 is unrun.**
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
@@ -344,6 +365,11 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   `CONV_2D` also reaches **685–1842 GOPS** vs 285 GOPS for FC on the same silicon.
 - `getDuration(DURATION_ON_HARDWARE)` reports ~6 µs for a 0.9 GMAC GEMM → unusable; time the
   synchronous `execute`.
+- **A bare `"bash"` from Python is WSL's bash, not git-bash** (measured 2026-11-16). `subprocess`
+  searches `System32` before `PATH`, so `run(["bash", "C:/…/build.sh"])` returns rc 127
+  (`/bin/bash: C:/…: No such file or directory`) and the build **silently never runs** — WSL mounts
+  this repo at `/mnt/c`, so neither the `C:/` nor the `/c/` form resolves. Always go through
+  `probe_host.bash_bin()` / `run()`; never spawn a bare `bash` for a build script.
 - **`smaps` does not see a GPU process's memory.** `/proc/<pid>/smaps_rollup` reported
   `Pss` 85,137 kB for `proc_a` while `dumpsys meminfo <pid>` reported `TOTAL PSS`
   **249,290 kB** for the same PID — the gap is the **`GL mtrack`** row (164,192 kB), the
