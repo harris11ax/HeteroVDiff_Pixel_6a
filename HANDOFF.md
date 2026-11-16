@@ -23,12 +23,12 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound |
-| Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg (blocked: no torch/diffusers on this host)** |
+| Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg — no longer environment-blocked: `.venv-ref` (torch 2.15.0+cpu, diffusers 0.43.0) is installed, commit `8663c3f`** |
 | Gates 3–5 | pending |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
 | **Sustained `T_N`** | **measured** → `docs/device/RESULTS_sustain_npu.md`; 60 rounds × 9 GEMMs = **24.6 s of continuous TPU work, drift +0.35 %** (first-20 % 408.9 / last-20 % 410.3 ms per round, slope +0.03 ms/round) while the TPU zone rose 25.0 → 31.0 °C ⇒ **no derating over a full NPU stage**, so `T_N` carries no throttle term. Tool: `python tools/npu/sustain_npu.py` |
 | **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.61 s, 5.394× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
-| Blocker | every rate the cut needs is now measured on both engines **and checked for sustained drift** — the mid-block VAE attention closed 2026-11-15 21:2x, the 24.6 s sustained soak 21:41. What is still blocked: the Gate-1 end-to-end PSNR/SSIM leg and `calibrate.py` (**no torch/diffusers on this host**), and Gates 3–5 are unbuilt |
+| Blocker | every rate the cut needs is now measured on both engines **and checked for sustained drift** — the mid-block VAE attention closed 2026-11-15 21:2x, the 24.6 s sustained soak 21:41. What is still unrun: the Gate-1 end-to-end PSNR/SSIM leg and `calibrate.py` — **environment resolved 2026-11-15 (commit `8663c3f`): use `.venv-ref/Scripts/python.exe`** (torch 2.15.0+cpu, diffusers 0.43.0, transformers 5.23.0, deliberately NOT `.venv-quant` because this cron fires every 15 min in this tree). Measured fp32 GEMM 4096³ = 449.9 GFLOPS, so a 36.0 TFLOP 9-frame reference chunk is ~1.3 min. Gates 3–5 are unbuilt |
 
 ## The two results that changed the project
 
@@ -111,9 +111,11 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    1317/1317. → `docs/device/RESULTS_gate1.md`. Bug caught en route: a suffix filter had dropped all
    30 per-block `scale_shift_table` (276,480 params) while still printing PASS — classification is
    now by role, with a coverage assertion in both scripts.
-   **Still open in Gate 1:** (a) the end-to-end FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg —
-   blocked, this host has no torch/diffusers; (b) `calibrate.py` (deliverable 4) — same blocker, it
-   has to *run* the FP32 forward pass to record `max|x|/127` per (step, block, GEMM).
+   **Still open in Gate 1:** (a) the end-to-end FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg — the
+   environment for it now exists (`.venv-ref`, see the blocker row above: torch 2.15.0+cpu,
+   diffusers 0.43.0, transformers 5.23.0, installed 2026-11-15 in commit `8663c3f`), so this is
+   code to write, not a wall; (b) `calibrate.py` (deliverable 4) — same situation, it has to *run*
+   the FP32 forward pass to record `max|x|/127` per (step, block, GEMM).
    **Done 2026-11-15 20:5x, host only** → `docs/device/RESULTS_phase1_artifacts.md`:
    deliverable 2 `phase1_quant/expert_factors.py` (`artifacts/experts/detail/`, **240,089,216 B FP16,
    delta 0** vs Gate 1; 492 tensors = 30 × 16 LoRA + 12 timestep; FP16 worst relF 0.0220 %; writing
