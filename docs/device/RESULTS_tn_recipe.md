@@ -190,3 +190,36 @@ lock-breaking question is not this number.
    28.4 on the 8 s confirm at an unchanged battery → `NO TIMED RUN`. `gate_wait` now returns to the
    wait loop on a failed confirm instead of failing the gate (still bounded by `--max-wait`); the
    device passed 53 s later at 27.0 with no cooling applied.
+
+## P3.7f — 40 solo passes under a rising TPU: the recipe does not derate over 26 → 33 °C
+
+Capture `tn_recipe_20261116_023810` (start TPU **26.0** · skin1 23.8 · skin2 24.4 · battery 22.7,
+gate **PASS**, 0.7 °C of slack unused). Same binary, same geometry, **40 passes** instead of 5:
+
+| | |
+|---|---|
+| steady block (passes 2…40) | **647.93 ms** median, 647.59 mean, n = 39, stdev **1.76 ms** |
+| spread across all 39 warm passes | 643.78 – 651.70 ms (**1.23 %**) |
+| first 10 vs last 10 warm passes | 647.03 → 648.10 ms = **+0.16 %** |
+| slope | **+0.0375 ms/pass** |
+| TPU zone over the run | **26.0 → 33.0 °C** (battery flat at 22.7) |
+
+Two things follow.
+
+1. **Reproducibility.** Two independent floor-started runs give **646.7** and **647.9 ms** (0.2 %
+   apart) at 0.03 % and 0.27 % within-run spread. The exact recipe's solo rate is settled.
+2. **No derate in the range the earlier runs actually spent their time in.** First-10 vs last-10
+   differs by **+0.16 %** with the TPU zone up 7 °C — i.e. a rise of the order the 9-GEMM soak saw
+   (+0.35 %, 25 → 31 °C). This does **not** yet test the co_run's regime: 40 passes only take the
+   TPU to 33 °C, while `corun_recipe_20261116_020926` climbed to **45 °C** because the GPU was
+   heating the same SoC. So the P3.7e question stands, with its two candidates now asymmetric:
+
+- **thermal above ~34 °C** — untested, and the only explanation left that is not about the GPU;
+- **order/state** — *supported* by this run in the sense that a clean floor start lands at 647–648
+  every time, never at 707.
+
+**The decisive run is still a floor-started `co_recipe`**: its first contended passes arrive while
+the TPU is still near the floor, so contention and heat are separable *within one run* — if the
+first contended pass jumps straight to ~700 ms, that is contention; if the jump tracks the TPU zone
+crossing ~40 °C, that is thermal. `--delay` must be long enough to bank floor-grade solo passes
+(≥ 6 s), and `--reps` long enough to walk the temperature range (≥ 24).

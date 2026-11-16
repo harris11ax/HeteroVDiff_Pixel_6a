@@ -99,32 +99,48 @@ def overlap(a0: float, a1: float, ivs: list[tuple[float, float]]) -> float:
 
 
 def gate_wait(serial: str, slack: float, max_wait: float, poll: float, confirm: int):
+    """Wait for the thermal floor, then confirm on fresh samples.
+
+    A failed confirm re-enters the wait loop instead of failing the gate: the TPU
+    zone is whole-degree, so one sample can step up while the device has not moved
+    (same defect fixed in tools/pipe/tn_recipe.py the same night — it aborted a
+    floor-grade run at 27.0 PASS / 28.4 confirm).
+    """
     t0 = time.time()
     while True:
-        z = read_zones(serial)
-        peak = max((v for k, v in z.items() if k in ZONE_KEYS), default=None)
-        batt = z.get("battery")
-        if peak is None or batt is None:
-            print("  [gate] zones unreadable — refusing a timed run")
-            return False, z
-        gate = batt + 3.0 + slack
-        el = int(time.time() - t0)
-        print(f"  [gate {el:4d}s] peak={peak:.1f} gate={gate:.1f}")
-        if peak <= gate:
-            break
+        while True:
+            z = read_zones(serial)
+            peak = max((v for k, v in z.items() if k in ZONE_KEYS), default=None)
+            batt = z.get("battery")
+            if peak is None or batt is None:
+                print("  [gate] zones unreadable — refusing a timed run")
+                return False, z
+            gate = batt + 3.0 + slack
+            el = int(time.time() - t0)
+            print(f"  [gate {el:4d}s] peak={peak:.1f} gate={gate:.1f}")
+            if peak <= gate:
+                break
+            if time.time() - t0 > max_wait:
+                print(f"  [gate] gave up after {el}s")
+                return False, z
+            time.sleep(poll)
+        ok = True
+        for i in range(max(1, confirm)):
+            time.sleep(8)
+            z = read_zones(serial)
+            peak = max((v for k, v in z.items() if k in ZONE_KEYS), default=None)
+            gate = (z.get("battery") or 99) + 3.0 + slack
+            print(f"  [gate confirm {i + 1}/{max(1, confirm)}] peak={peak:.1f} gate={gate:.1f}")
+            if peak is None or peak > gate:
+                ok = False
+                break
+        if ok:
+            return True, z
         if time.time() - t0 > max_wait:
-            print(f"  [gate] gave up after {el}s")
+            print("  [gate] confirm kept stepping over the gate; giving up")
             return False, z
+        print("  [gate] confirm stepped over the gate — back to waiting")
         time.sleep(poll)
-    for i in range(max(1, confirm)):
-        time.sleep(8)
-        z = read_zones(serial)
-        peak = max((v for k, v in z.items() if k in ZONE_KEYS), default=None)
-        gate = (z.get("battery") or 99) + 3.0 + slack
-        print(f"  [gate confirm {i + 1}/{max(1, confirm)}] peak={peak:.1f} gate={gate:.1f}")
-        if peak is None or peak > gate:
-            return False, z
-    return True, z
 
 
 def analyse(gpu_solo_txt: str, gpu_co_txt: str, npu_txt: str) -> dict:

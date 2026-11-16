@@ -313,11 +313,21 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  System32 before PATH ⇒ the build silently never ran, rc 127), now routed through
  `probe_host.bash_bin()` for every tool; and a single confirm sample no longer aborts a floor-grade
  run (it re-enters the wait loop).
- **NEXT ACTION: (a) a floor-started `tools/corun/co_recipe.py` run — the only measurement that
- separates contention from thermal/order for the exact recipe (compare its crossing passes to
- 646.7 ms, not to 707); (b) `ffn.down` under contention (0.2580 s downsep still solo); (c) the real
- Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's PSNR/SSIM leg and `calibrate.py`
- are the host-only work, Gate 5 is unrun.**
+ **NEXT ACTION: (a) a floor-started `tools/corun/co_recipe.py` run
+ (`--delay 6 --reps 24`) — the only measurement that separates contention from thermal/order for
+ the exact recipe, because its first contended passes arrive while the TPU is still near the floor
+ (compare its crossing passes to 646.7 ms, not to 707); (b) `ffn.down` under contention (0.2580 s
+ downsep still solo); (c) the real Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's
+ PSNR/SSIM leg and `calibrate.py` are the host-only work, Gate 5 is unrun.**
+ **P3.7f DONE 2026-11-16 02:38 — the solo rate is settled and does not derate in 26→33 °C** →
+ `RESULTS_tn_recipe.md` §P3.7f, capture `tn_recipe_20261116_023810` (40 passes, gate PASS at
+ TPU 26.0): **647.93 ms** steady median (n=39, stdev 1.76 ms, 643.8–651.7 = 1.23 % spread),
+ first-10 vs last-10 **+0.16 %**, slope **+0.0375 ms/pass** while the TPU rose **26 → 33 °C**
+ (battery flat 22.7). Two floor-started runs now agree to **0.2 %** (646.7 / 647.9). This leaves
+ the P3.7e confound asymmetric: **order/state is supported** (a clean start lands at 647–648 every
+ time, never 707) and **thermal above ~34 °C is untested** — 40 passes only reach 33 °C, whereas
+ the co_run climbed to 45 °C on the GPU's heat. The decisive run therefore has to walk the
+ temperature range *and* bank floor-grade solo passes in one go.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
