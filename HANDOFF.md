@@ -147,7 +147,10 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    two-process pipeline that streams ≥10 chunks on the phone: GPU process on blocks `[0,160)`, NPU
    process on `[160,180)` + decode, one handoff per chunk, no manual intervention. Start with the
    chunk handoff (one file-mapped artifact, no second INT8 copy) and prove 2 chunks before 10.
-   Host-only work that can run in parallel: fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`.
+   **Build order is written down: `phase3_pipeline/PLAN.md`** (P3.1 handoff selftest → P3.2 GPU stage →
+   P3.3 NPU stage → P3.4 coordinator/2 chunks → P3.5 10 chunks → P3.6 Gate 4); next tick starts P3.1.
+   Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
+   — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
