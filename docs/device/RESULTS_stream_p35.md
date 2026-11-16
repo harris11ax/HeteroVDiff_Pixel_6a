@@ -87,8 +87,11 @@ engine-wide, not an artifact of the 10-closure timing form.
 **Cause is not established, and is not claimed.** DVFS or a thermal trip point are the
 candidates; nothing on this phone exposes the GPU frequency without root. What is established is
 the shape (a step at 232 s), its stability (−0.9 % for 1000 blocks), and its one-sidedness (GPU
-only). Zones over the run: TPU 25.0 → **52.0 °C**, skin_therm1 23.6 → 41.9 °C, battery
-22.5 → 28.0 °C, VIRTUAL-SKIN 23.4 → 38.1 °C.
+only). It also **clears with cooldown rather than accumulating**: P3.4 (23:14) and P3.5a (23:37)
+both started from the floor after an already-hot phone and measured 187.2/168.0 and 202.1 ms
+blocks, so the derate tracks the current thermal state, not wear. Zones over the run: TPU
+25.0 → **52.0 °C**, skin_therm1 23.6 → 41.9 °C, battery 22.5 → 28.0 °C, VIRTUAL-SKIN
+23.4 → 38.1 °C.
 
 **Why P3.5a missed it:** 320 blocks ≈ 64.7 s of GPU work never reaches the knee. Every number
 in `RESULTS_stream_p35a.md` is inside the healthy regime; the claim there that the GPU stream
