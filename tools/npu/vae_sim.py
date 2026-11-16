@@ -113,7 +113,7 @@ class Sim:
     def __init__(self, layers: list[dict], ops: list[tuple], max_layer: int,
                  shuffle: str = "wire", bias_mode: str = "per_tap",
                  round_mode: str = "per_tap", label: str = "wire",
-                 add_fp: tuple = (), cout_pc: bool = False):
+                 add_fp: tuple = (), cout_pc: bool = False, oracle: bool = False):
         self.layers, self.ops, self.max_layer = layers, ops, max_layer
         self.shuffle = shuffle
         self.bias_mode, self.round_mode, self.label = bias_mode, round_mode, label
@@ -123,6 +123,12 @@ class Sim:
         # the 96->3 `conv_out` three per-channel output scales instead of one.
         self.add_fp = set(add_fp)
         self.cout_pc = cout_pc
+        # P3.17 arm `oracle`: every conv is fed the REFERENCE module's own input,
+        # quantised at the program's `SA_in`, instead of the walk's accumulated codes.
+        # Its output cosine then measures the site itself (weights, output scale,
+        # per-tap bias/rounding) with the upstream error removed.
+        self.oracle = oracle
+        self.oracle_in: dict[str, tuple] = {}         # name -> (path, shape)
         self.chan_sa: dict[int, np.ndarray] = {}      # ai -> per-channel sa_out
         self.sain_override: dict[int, float] = {}     # ai -> a re-calibrated input scale
         self.wbytes = np.memmap(ART / "weights_int8.bin", dtype=np.int8, mode="r")
@@ -250,7 +256,16 @@ class Sim:
         # requant: out = (acc + bias_int) * sa_in*sc[c] / sa_out
         bi_int = np.trunc(bi / (sa_in * sc)).astype(np.int64)
         W = self.weights(li)
-        inb = self.gather(L, sa_in)
+        oi = self.oracle_in.get(L["name"]) if self.oracle else None
+        if oi is not None:
+            path, shape = oi
+            want = (L["frames"], L["cin"], L["h"], L["w"])
+            if tuple(shape) != want:
+                raise SystemExit(f"{L['name']}: reference input {tuple(shape)} != program "
+                                 f"{want} — the oracle arm cannot substitute here")
+            inb = np.fromfile(path, dtype=np.int8).reshape(shape)
+        else:
+            inb = self.gather(L, sa_in)
         pad = (L["taps"][0]["kh"] // 2, L["taps"][0]["kw"] // 2)
         # exact integer accumulation: keep a partial sum below 2^24 in float32
         per_term = 127 * 127 * (2 * pad[0] + 1) * (2 * pad[1] + 1)
@@ -304,6 +319,7 @@ class Sim:
         self.last_inb = inb
         self.last_inb_name = L["name"]
         r = dict(idx=li, ai=ai, name=L["name"], shape=list(outb.shape), sa_out=out_sa_use,
+                 sa_in=float(sa_in), oracle=bool(oi is not None),
                  clamp=clamps / outb.size, scheme=self.label, tap0_skipped=tap0_skipped)
         if sa_vec is not None:
             r.update(pc=True, sa_out_pc=[float(v) for v in sa_vec])
@@ -411,15 +427,46 @@ def reference_trace(z: torch.Tensor, names: list[str], sa_out: dict[str, float],
 
     vae = AutoencoderKLWan.from_pretrained(str(VAE_DIR), torch_dtype=torch.float32).eval()
     calls: dict[str, list] = {n: [] for n in names}
-    ins: dict[str, list] = {n: [] for n in names if n.endswith(".resample.1")}
+    # P3.17: EVERY conv's own input, not just `resample.1`'s. The oracle-input arm
+    # needs the tensor each module actually consumed, in [frames, C, H, W] order.
+    ins: dict[str, list] = {n: [] for n in names}
+    # `upsample3d`'s `time_conv` is the one module the streaming decode does NOT run
+    # the way the program does: `WanResample.forward` skips it for the first latent
+    # frame (it sets a "Rep" sentinel and replicates that frame) and then calls it one
+    # frame at a time with a zeroed causal cache, so its hooked input is T-1 frames and
+    # its hooked output T-1 frames — which is why layers 11/20 read SHAPE MISMATCH in
+    # every arm to date. Its real input is the upsample block's input x, so hook the
+    # PARENT for those two and rebuild the module's own full-sequence output after the
+    # decode. This is the only substitution in the tool, and it is logged.
+    par = {n: n[: -len(".time_conv")] for n in names if n.endswith(".time_conv")}
+    pins: dict[str, list] = {n: [] for n in par}
     hooks = []
+
+    def _mk_in_hook(n):
+        def h(m, i):
+            # Quantise in the hook: 36 convs hold ~1.4 G elements of input, so keeping
+            # float32 clones would cost ~5.6 GB. int8 at SA_in is exactly what the
+            # conv consumes anyway.
+            q = torch.clamp(torch.round(i[0].detach() / float(sa_in[n])),
+                            -127.0, 127.0).to(torch.int8)
+            if q.dim() == 5:              # conv3d [b, c, t, h, w] -> [t, c, h, w]
+                q = q[0].permute(1, 0, 2, 3)
+            ins[n].append(q)
+        return h
+
+    def _mk_par_hook(n):
+        def h(m, i):
+            x = i[0].detach()
+            pins[n].append(x[0].permute(1, 0, 2, 3).contiguous())   # [t, c, h, w] fp32
+        return h
+
     for n in names:
         mod = vae.get_submodule(n)
         hooks.append(mod.register_forward_hook(
             lambda m, i, o, n=n: calls[n].append(o.detach().clone())))
-        if n in ins:                       # the Conv2d's own input = the gathered, shuffled,
-            hooks.append(mod.register_forward_pre_hook(     # upsampled tensor under test
-                lambda m, i, n=n: ins[n].append(i[0].detach().clone())))
+        hooks.append(mod.register_forward_pre_hook(_mk_in_hook(n)))
+    for n, p in par.items():
+        hooks.append(vae.get_submodule(p).register_forward_pre_hook(_mk_par_hook(n)))
     hooks.append(vae.decoder.mid_block.attentions[0].register_forward_hook(lambda m, i, o: i[0]))
     if bypass_pqc:
         hooks.append(vae.post_quant_conv.register_forward_hook(lambda m, i, o: i[0]))
@@ -430,6 +477,34 @@ def reference_trace(z: torch.Tensor, names: list[str], sa_out: dict[str, float],
         out = vae.decode(z).sample
     for h in hooks:
         h.remove()
+
+    # ---- P3.17: rebuild `upsample3d`'s time_conv input AND target in whole-sequence form.
+    # The streaming reference ran it on T-1 single frames (frame 0 replicated, not convolved),
+    # so both its hooked input and its hooked output are short by one frame. Its real input is
+    # the upsample block's input; running the same module on that input is the target the
+    # program's 3-frame conv is trying to hit. Only layers 11/20 are affected.
+    rebuilt = {}
+    for n in par:
+        if not pins[n]:
+            continue
+        xin = torch.cat(pins[n], dim=0)                        # [T, C, H, W] fp32
+        mod = vae.get_submodule(n)
+        with torch.no_grad():
+            yout = mod(xin.permute(1, 0, 2, 3).unsqueeze(0))    # [1, 2C, T, H, W]
+        yout = yout[0].permute(1, 0, 2, 3).contiguous()        # [T, 2C, H, W]
+        st_in = int(sum(t.shape[0] for t in ins[n]))
+        st_out = int(sum(t.shape[2] for t in calls[n])) if calls[n] and calls[n][0].dim() == 5 \
+            else int(sum(t.shape[0] for t in calls[n]))
+        ins[n] = [torch.clamp(torch.round(xin / float(sa_in[n])), -127.0, 127.0).to(torch.int8)]
+        calls[n] = [yout]
+        rebuilt[n] = dict(streaming_in_frames=st_in, streaming_out_frames=st_out,
+                          whole_in_frames=int(xin.shape[0]), whole_out_frames=int(yout.shape[0]),
+                          note="the streaming decode skips `time_conv` on the first latent frame "
+                               "(replicates it) and calls it one frame at a time with a zeroed "
+                               "causal cache, so its own input/output are T-1 frames. Rebuilt from "
+                               "the upsample block's input — same module, whole-sequence form.")
+        log(f"time_conv {n.split('decoder.')[-1]}: streaming in/out {st_in}/{st_out} frames -> "
+            f"whole-sequence {xin.shape[0]}/{yout.shape[0]}")
     tr = {}
     for n in names:
         parts = calls[n]
@@ -452,17 +527,19 @@ def reference_trace(z: torch.Tensor, names: list[str], sa_out: dict[str, float],
                      # measurement that says what a per-channel scale would be worth
                      # (P3.16, the `conv_out` 96->3 leg).
                      chmax=[float(v) for v in cat.abs().amax(dim=(0, 2, 3))])
-        if n in ins:
+        if ins.get(n):
             ic = torch.cat(ins[n], dim=0)              # [frames, C, H, W] in output-frame order
             p = tmp / f"{n}.in.i8"
-            p.write_bytes(torch.clamp(torch.round(ic / float(sa_in[n])), -127.0, 127.0)
-                          .to(torch.int8).numpy().tobytes())
+            p.write_bytes(ic.numpy().tobytes())        # already int8 at sa_in
             tr[n]["in_path"] = str(p)
             tr[n]["in_sa"] = float(sa_in[n])
             tr[n]["in_shape"] = list(ic.shape)
+            tr[n]["in_clamp"] = float(ic.abs().eq(127).float().mean())
+            ins[n] = []                                # free the int8 chunks (~1.4 GB total)
     pqc_np = None
     if pqc_out is not None:
         pqc_np = pqc_out.squeeze(0).permute(1, 0, 2, 3).contiguous().numpy()   # [f,c,h,w]
+    tr["_rebuilt_time_conv"] = rebuilt
     return tr, out, pqc_np
 
 
@@ -539,6 +616,11 @@ def main() -> int:
                          "gather: `add34` = the last up_block's residual add done in float32 "
                          "(no int8 hop; `norm_out` then does the only rounding), `coutpc` = "
                          "3 per-channel output scales for the 96->3 `conv_out`, `both34` = both")
+    ap.add_argument("--oracle", action="store_true",
+                    help="P3.17: run the `wire` arm and an `oracle` arm in which every conv is fed "
+                         "the REFERENCE module's own input, quantised at the program's SA_in, so a "
+                         "layer's cosine separates inherited error (input already wrong) from "
+                         "intrinsic error (the conv/weights/scale at that site)")
     ap.add_argument("--out", default="vae_sim")
     args = ap.parse_args()
 
@@ -604,6 +686,11 @@ def main() -> int:
             f"{['%.6g' % v for v in chan_sa[L35['ai']]]} "
             f"(single sa {float(sim.SAOUT[L35['ai']]):.6g}, "
             f"gain {max(ch) / (min(ch) or 1):.2f}x between channels)")
+    elif args.oracle:
+        # P3.17 — the discrimination P3.16 named: same walk, same scheme, only the
+        # conv's INPUT changes.
+        arms = [("wire", "shift", "per_tap", "per_tap", {}),
+                ("oracle", "shift", "per_tap", "per_tap", dict(oracle=True))]
     else:
         modes = ["wire", "shift"] if args.shuffle == "both" else [args.shuffle]
         arms = [(m, m, "per_tap", "per_tap", {}) for m in modes]
@@ -614,11 +701,22 @@ def main() -> int:
     def run_arm(label: str, shuffle: str, bias_mode: str, round_mode: str,
                 lat_use: np.ndarray, lat_sa: float, tr_use: dict, out_use: torch.Tensor,
                 override: dict[int, float] | None = None, add_fp: tuple = (),
-                cout_pc: bool = False) -> dict:
+                cout_pc: bool = False, oracle: bool = False) -> dict:
         log(f"--- arm {label}: gather={shuffle} bias={bias_mode} round={round_mode}"
-            + (f" add_fp={add_fp}" if add_fp else "") + (" cout_pc=1" if cout_pc else ""))
+            + (f" add_fp={add_fp}" if add_fp else "") + (" cout_pc=1" if cout_pc else "")
+            + (" oracle_input=1" if oracle else ""))
         s = Sim(layers, ops, args.max_layer, shuffle=shuffle, bias_mode=bias_mode,
-                round_mode=round_mode, label=label, add_fp=add_fp, cout_pc=cout_pc)
+                round_mode=round_mode, label=label, add_fp=add_fp, cout_pc=cout_pc,
+                oracle=oracle)
+        if oracle:
+            s.oracle_in = {n: (v["in_path"], tuple(v["in_shape"]))
+                           for n, v in tr_use.items() if v.get("in_path")}
+            miss = [L["name"] for L in layers if L["idx"] <= args.max_layer
+                    and L["name"] not in s.oracle_in]
+            if miss:
+                raise SystemExit(f"oracle: no reference input for {miss}")
+            log(f"    oracle inputs: {len(s.oracle_in)} convs, "
+                f"{sum(np.prod(sh) for _p, sh in s.oracle_in.values()) / 1e6:.1f} M codes")
         if cout_pc:
             s.chan_sa = chan_sa
         if override:
@@ -716,11 +814,45 @@ def main() -> int:
         shutil.rmtree(tmp2, ignore_errors=True)
     shutil.rmtree(tmp, ignore_errors=True)
 
+    # ------------------------------------------------- P3.17: inherited vs intrinsic error
+    oracle_doc = None
+    if args.oracle and "oracle" in results and "wire" in results:
+        wc, oc = results["wire"]["convs"], results["oracle"]["convs"]
+        rows = []
+        for a, b in zip(wc, oc):
+            ci = a.get("cos_gather")
+            rows.append(dict(idx=a["idx"], ai=a["ai"], name=a["name"], sa_in=b.get("sa_in"),
+                             in_cos=ci, wire_cos=a.get("cosine"), oracle_cos=b.get("cosine"),
+                             inherited=None if ci is None else 1.0 - ci,
+                             intrinsic=None if b.get("cosine") is None else 1.0 - b["cosine"]))
+        intr = [r["intrinsic"] for r in rows if r["intrinsic"] is not None]
+        inh = [r["inherited"] for r in rows if r["inherited"] is not None]
+        sites = [r for r in rows if r["oracle_cos"] is not None]
+        oracle_doc = dict(
+            rows=rows, n=len(rows),
+            mean_intrinsic=float(np.mean(intr)) if intr else None,
+            median_intrinsic=float(np.median(intr)) if intr else None,
+            max_intrinsic=float(np.max(intr)) if intr else None,
+            mean_inherited=float(np.mean(inh)) if inh else None,
+            sites_intrinsic_gt_1pct=int(sum(1 for v in intr if v > 0.01)),
+            sites_intrinsic_gt_2pct=int(sum(1 for v in intr if v > 0.02)),
+            worst_site=min(sites, key=lambda r: r["oracle_cos"]) if sites else {},
+            layer34=next((r for r in rows if r["idx"] == 34), None),
+            time_conv_rebuilt=tr.get("_rebuilt_time_conv"),
+            note="`in_cos` = the wire arm's own conv input vs the reference module's input "
+                 "quantised at the program's SA_in; `wire_cos` = the conv's output cosine "
+                 "(= what P3.15/P3.16 report); `oracle_cos` = the SAME conv fed the reference's "
+                 "own input. intrinsic = 1 - oracle_cos (the site's own loss on a perfect "
+                 "input); inherited = 1 - in_cos (the error it was handed).")
+        log(f"oracle: mean intrinsic loss {oracle_doc['mean_intrinsic'] * 100:.2f} pts, "
+            f"mean inherited {oracle_doc['mean_inherited'] * 100:.2f} pts, "
+            f"{oracle_doc['sites_intrinsic_gt_1pct']}/{len(intr)} sites > 1 pt intrinsic")
+
     ts = time.strftime("%Y%m%d_%H%M%S")
     labels = list(results)
     doc = dict(kind="vae_program_sim", timestamp=ts, wire=str(Path(args.wire).name),
                latent_dir=ddir.name, max_layer=args.max_layer, results=results,
-               post_quant_conv=pqc_doc,
+               post_quant_conv=pqc_doc, oracle=oracle_doc,
                note="cosine = the simulator's int8 codes vs the fp32 reference's own module "
                     "output quantised at the same SA_out; a collapse localizes the op between "
                     "the previous conv and this one. `final` = the walk's last codes "
@@ -819,6 +951,34 @@ def main() -> int:
         md += ["", "Per-channel dequant is used for every arm's final number above (the `wire` arm "
                "has one scale, so this changes nothing for it); the `conv_out` column is the "
                "layer's own cosine against the reference module output."]
+    if oracle_doc:
+        orc = oracle_doc
+        md += ["", "## P3.17 — inherited vs intrinsic: the same conv on the reference's own input", "",
+               "`in` = the walk's own conv input vs the reference module's input at the program's "
+               "`SA_in`; `wire` = the conv's output cosine (P3.15/P3.16's column); `oracle` = the "
+               "same conv, same weights, same scheme, fed the **reference's** input. A layer whose "
+               "`oracle` is ~0.99 is faithful given a good input — its `wire` number is inherited. "
+               "One whose `oracle` is ~0.85 loses that much **at the site**.", "",
+               "| layer | module | `in` cos | `wire` cos | `oracle` cos | inherited | intrinsic |",
+               "|---|---|---|---|---|---|---|"]
+        for r in orc["rows"]:
+            f = lambda v: "—" if v is None else f"{v:.6f}"
+            ft = lambda v: "—" if v is None else f"{v * 100:.2f} pt"
+            md.append(f"| {r['idx']} | `{r['name'].split('decoder.')[-1]}` | {f(r['in_cos'])} | "
+                      f"{f(r['wire_cos'])} | {f(r['oracle_cos'])} | {ft(r['inherited'])} | "
+                      f"{ft(r['intrinsic'])} |")
+        md += ["", f"**Mean intrinsic loss {orc['mean_intrinsic'] * 100:.2f} pt** (median "
+               f"{orc['median_intrinsic'] * 100:.2f}, max {orc['max_intrinsic'] * 100:.2f}); mean "
+               f"inherited {orc['mean_inherited'] * 100:.2f} pt. "
+               f"{orc['sites_intrinsic_gt_1pct']}/{orc['n']} sites lose > 1 pt on a perfect input, "
+               f"{orc['sites_intrinsic_gt_2pct']}/{orc['n']} > 2 pt. Worst site: "
+               + (f"layer {orc['worst_site']['idx']} (`{orc['worst_site']['name']}`) at "
+                  f"{orc['worst_site']['oracle_cos']:.6f}." if orc["worst_site"] else "—")]
+        l34 = orc.get("layer34")
+        if l34:
+            md += ["", f"Layer 34 (`{l34['name']}`): input {l34['in_cos']:.6f}, wire output "
+                   f"{l34['wire_cos']:.6f}, oracle output {l34['oracle_cos']:.6f} ⇒ intrinsic "
+                   f"{l34['intrinsic'] * 100:.2f} pt, inherited {l34['inherited'] * 100:.2f} pt."]
     mdp = OUT / f"{args.out}_{ts}.md"
     mdp.write_text("\n".join(md) + "\n", encoding="utf-8")
     print(f"\nwrote {js}\nwrote {mdp}")

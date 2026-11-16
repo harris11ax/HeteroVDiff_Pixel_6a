@@ -1,5 +1,32 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
+*Updated 2026-11-16 (10:12, **P3.17 — the decode's error is 100 % INHERITED: every one of the 36
+convs is faithful on a good input (mean 0.14 pt of cosine, worst 0.46), and layer 34 is
+exonerated (0.09 pt intrinsic vs 15.18 pt inherited).** Host-only, **no device run and no device
+rate touched**: `vae_sim.py --oracle` (new arm — each conv fed the reference's own input at the
+program's `SA_in`), capture `vae_sim_20261116_100611`. **Validator: `wire` reproduces P3.16 to the
+digit** (20.5876 dB / 0.888501 / layer 34 0.714915); **`oracle` = 34.34 dB / 0.995595**, worst site
+`conv_out` 0.995406, **0/36 sites lose > 1 pt** on a perfect input. Inherited loss climbs
+1.47 pt (layers 0–11) → 4.35 (ub1) → 6.00 (ub2) → **11.03 (ub3)** while every site's own rounding
+stays ≤ 0.46 pt ⇒ **no per-layer quantisation tweak can recover the decode**; what is left is the
+glue (norm+SiLU requant, add, gather requant), which this instrument does not yet price. **Second
+finding, a hole in every table since P3.14: layers 11 and 20 (`upsample3d.time_conv`) printed
+`SHAPE MISMATCH` in all arms — 2 of 36 convs were never scored.** Cause measured:
+`_decode` runs ONE latent frame at a time and `WanResample.forward` **skips `time_conv` on frame 0**
+(`"Rep"` sentinel: replicates the block input, no conv), then calls it one frame at a time with a
+zeroed cache, so its hooked input/output are **T−1 frames** (2/3, 4/5) — which is also why P3.14's
+gather mapping is asymmetric. The tool now rebuilds those two layers' input from the upsample
+block's input and its target from the same module in whole-sequence form: **36/36 convs scored for
+the first time** (11: 0.986019 wire / 0.996160 oracle; 20: 0.961396 / 0.997462). The
+whole-sequence-vs-streaming `time_conv` difference at frame 0 is **reported, not applied**. `T_V`
+8.908 s, `T_N` exact 0.8905 s/block, `k_b*` 165 untouched. → `docs/device/RESULTS_vae_oracle.md`.*
+**NEXT ACTION, in order: (a) the GLUE one-hop arm** — the same instrument extended to
+`NORMSILU` / `ADD` / gather: feed each glue op the reference's own input and score its output, so
+34.34 → 20.59 dB decomposes into conv vs glue and the amplification in the last up_block gets a
+per-op number (host-only, one walk); **(b)** the `post_quant_conv` branch (+7.32 dB, edits the
+artifact) still waits on the student's call; **(c)** the deliverable side — `proc_b --decode 1` is
+still a no-op stub, then Gate 5.
+
 *Updated 2026-11-16 (09:35, **P3.16 — layer 34 is NEITHER its residual add's grid NOR the
 `conv_out` 96→3 shape: both priced, together worth 0.003 dB.** Host-only, four simulator
 arms, **no device run and no device rate touched**: `vae_sim.py --layer34` → arms
