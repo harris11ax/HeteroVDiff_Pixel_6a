@@ -23,7 +23,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) still unmeasured ⇒ `T_V` is a lower bound on both |
-| Gate 1 (artifact) | pending — quantiser not written yet (`phase1_quant/` has only the inspector) |
+| Gate 1 (artifact) | pending — quantiser not written yet (`phase1_quant/` has only the inspector); the **scale-layout parity cost is measured** → `docs/device/RESULTS_scales.md` |
 | Gates 3–5 | pending |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
 | **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.58 s, 5.40× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode |
@@ -76,9 +76,14 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    after 48.7 s). Measured: Mali **47.33 ms/block** vs Edge TPU 7×K=1280+6×ADD
    **258.0 ms/block** ⇒ 5.45× in Mali's favour. New modes: `downsep`, `kcompile`, `ksweep`,
    `diag` (see `RESULTS_npu_tn.md` §4). `T_N` = **0.6758 s/block**.
-3. **Per-column scales vs the NPU stage.** `FULLY_CONNECTED` only takes per-tensor weight scales.
-   Either the NPU graph uses per-tensor scales (measure the Gate 1/4 parity cost) or the NPU is
-   restricted to shapes with an equivalent path. This touches `design_locks.json` → student's call.
+3. **Per-column scales vs the NPU stage — cost now measured, decision still yours.** `FULLY_CONNECTED`
+   takes per-tensor weight scales only. Measured on the real weights (40 GEMM instances, blocks
+   0/5/15/29): per-tensor costs **2.15× the mean GEMM output error** (3.01 % vs 1.40 %, worst 5.44×)
+   and fails the Gate-1 `cosine ≥ 0.999` weight bar on 5/40 instances (worst 0.996892) where
+   per-column fails none; the penalty tracks column-scale spread at **r = 0.805**, i.e. it is a
+   weight property, not a shape property — so "restrict the NPU to shapes that quantise the same"
+   is not supportable, and the cheap subset (`attn2.to_k`+`to_v`) is only **10.2 % of block MACs**.
+   → `docs/device/RESULTS_scales.md`, `phase1_quant/scale_parity.py`. Touches `design_locks.json`.
 4. **`T_V` — VAE decode.** ~~TPU branch done~~ **both branches now measured 2026-11-15**:
    TPU `CONV_2D` taps **10.554 s/chunk** (969.7 GOPS, gate-compliant start) vs Mali
    `conv8_taps` **12.256 s/chunk** (417.5 GOPS, TPU 26.0 °C start, 7/13 classes exact) ⇒

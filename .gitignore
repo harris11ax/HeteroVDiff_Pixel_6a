@@ -17,6 +17,7 @@ phase3_pipeline/build/
 __pycache__/
 *.pyc
 .venv/
+.venv-quant/
 
 # device-run scratch state (agent-only, never committed)
 docs/device/.measurement_in_flight

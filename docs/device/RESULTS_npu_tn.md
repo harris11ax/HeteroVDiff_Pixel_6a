@@ -228,6 +228,7 @@ the graphs executed on the accelerator rather than the CPU.
 | `T_V` (VAE decode) | **measured on both branches** → `RESULTS_vae_tv.md`, `RESULTS_corun_tg.md` |
 | co-run `T_G` | **measured 2026-11-15 19:48** → `RESULTS_corun_tg.md`: GPU base block **0.1474 s** while the TPU executed (no slowdown; 8 % faster than solo), NPU 9-GEMM round **0.3904 s** (per-GEMM Δ ≤ 4 %); `T_N` co-run = **0.6484 s** (downsep part solo) |
 | `k_b*` | **solved = 160** (`configs/rates_preset_a.json`, period 23.58 s, 5.40× vs NPU-only); caveat: `T_V` is still a lower bound (mid-block attention unmeasured), and 162 with the Mali decode |
+| per-tensor vs per-column scales (parity) | **measured** → `RESULTS_scales.md`: 40 GEMM instances, blocks 0/5/15/29, real FP32 weights. Per-tensor mean GEMM output error **3.01 %** vs per-column **1.40 %** (2.15×; worst 5.44×), Gate-1 weight cosine ≥ 0.999 fails 5/40 vs 0/40; penalty tracks column-scale spread r = 0.805. No device latency involved |
 
 ## Next actions, in order
 
@@ -237,13 +238,23 @@ the graphs executed on the accelerator rather than the CPU.
    47.33 ms/block vs Edge TPU 258.0 ms/block as 7×K=1280 + 6 ADD; a single FC at K=8960, 4480 or
    1792 has no compilable graph (K ceiling 1664). Mali wins by 5.45×, so the TPU cannot host the
    down projection — **the choice is the student's, the comparison is in §4**.
-3. **`T_V` — VAE decode.** No `CONV_3D` in NNAPI: either decompose the causal 3D convs into
-   shifted 2D `CONV_2D` taps on the TPU, or decode on Mali in OpenCL. Measure both, report both.
+3. ~~**`T_V` — VAE decode.**~~ **done 2026-11-15** → `RESULTS_vae_tv.md`: shifted-`CONV_2D` taps on
+   the TPU **10.554 s/chunk** vs Mali `conv8_taps` **12.256 s/chunk** ⇒ the NPU is 1.16× faster at
+   the decode. Open ends: mid-block 3-D attention (32.4 GMAC) has no rate on either engine, so
+   `T_V` is a lower bound; and the Mali conv runs at 48 % of its own GEMM rate (tile re-staged per
+   tap) — a halo-staged tile is the next measurement.
 4. **Co-run `T_G`.** ~~Two processes, one file-mapped artifact, GPU on blocks `[0,k)` while the NPU
    runs blocks `[k,180)` + decode.~~ **done 2026-11-15 19:48** → `RESULTS_corun_tg.md`: 99.8 % overlap,
    GPU base block 0.1474 s (solo 0.1618 — no contention measured), NPU 9 GEMMs 0.3904 s (solo table
    0.4178), so this section's `T_N` of 0.6758 s becomes **0.6484 s** under the co-run and `k_b* = 160`.
    Two open ends: `ffn.down`'s 0.2580 s is still a solo number, and the GPU got *faster* under load
    for a reason this run did not establish (DVFS is the candidate, not a claim).
-5. **Decide the per-column-scale consequence** for the NPU stage (finding #2) — it changes Gate 1/4
-   parity targets, so it must be settled before the quantiser is written.
+5. **Decide the per-column-scale consequence** for the NPU stage (finding #2) —
+   **cost measured 2026-11-15** → `docs/device/RESULTS_scales.md` + `phase1_quant/scale_parity.py`
+   (40 GEMM instances, blocks 0/5/15/29, real FP32 weights, float64 reference): per-tensor scales
+   cost **2.15× the mean GEMM output error** (3.01 % vs 1.40 %; worst instance 5.44×) and fail the
+   Gate-1 `cosine ≥ 0.999` weight bar on **5 of 40** instances (worst 0.996892) where per-column
+   fails none. The penalty tracks column-scale spread (**r = 0.805**), so it is a weight property,
+   not a shape property — a shape-only "equivalent path" restriction is not supportable, and
+   per-tensor-where-cheap would cover only `attn2.to_k`+`attn2.to_v` = **10.2 % of block MACs**.
+   **The choice stays the student's; both branches now have numbers.**
