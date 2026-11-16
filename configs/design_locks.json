@@ -168,8 +168,10 @@
   },
   "gates": {
     "gate_1_artifact": {
-      "status": "pending",
-      "targets": "int8 bytes = 1.296 GiB +/- 1 MiB; PSNR >= 28 dB, SSIM >= 0.92 vs FP32 (host simulation)"
+      "status": "partial - every integrity leg PASSES; the end-to-end FP32-vs-INT8 PSNR/SSIM leg has not run (blocked: no torch/diffusers on the host)",
+      "targets": "int8 bytes = 1.296 GiB +/- 1 MiB; PSNR >= 28 dB, SSIM >= 0.92 vs FP32 (host simulation)",
+      "evidence": "docs/device/RESULTS_gate1.md + artifacts/manifest.json. INT8 payload 1,391,984,640 B = delta 0 against the reference; 30 regions of 46,399,488 B (44.25 MiB, limit 47.29); 300/300 GEMMs cosine >= 0.999 (worst 0.999922, ffn.net.2); MAC-weighted rel. Frobenius 0.93% (worst 1.25%), better than the 3-5% expected; coverage 1317 tensors = 300 INT8 + 525 FP16 + 492 expert-deferred, 0 orphaned; byte identity re-derived by an independent verifier (61 s vs the quantiser's 40 s). FP16 remainder is 54,024,320 B of payload in 54,573,056 B of files (the balance is 4096-B alignment padding - manifest totals/fp16_bytes vs totals/fp16_file_bytes).",
+      "not_measured": "end-to-end decoded-frame PSNR/SSIM: needs the Wan model to run in FP32 as the reference, which needs torch + diffusers, absent from this host"
     },
     "gate_2_zero_copy": {
       "status": "pass",
