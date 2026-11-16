@@ -127,6 +127,14 @@ struct SlotHdr {           // 64 B, one per slot
   a stub: wire the measured 10.554 s TPU decode into the NPU stage as real work, and
   make `proc_b` compare the payload it consumes against an int32 reference for the
   same block instead of only hashing it.
+  **P3.7a half done 2026-11-16 01:01** → `docs/device/RESULTS_gate3_parity.md`. The
+  comparison exists and is exact (`gate3_parity.py`, `proc_b --dump-parity/--act`), and
+  it says the stage **fails**: only **25.8 %** of each output tile matches exact integer
+  accumulation — the last 384-column block is bit-exact for every row and row 0 is
+  bit-exact for every column, nothing else is. Reference proved by those same regions;
+  async-write, alignment, transpose, stride, permutation, shift, stale-GEMM and
+  weight-echo hypotheses all ruled out by measurement. **Next: bisect with a
+  single-output-tile (`N = 384`) graph.** The decode is still a stub.
 
 ## Rules that carry over
 

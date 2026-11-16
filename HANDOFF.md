@@ -1,9 +1,11 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (00:40, **P3.6 landed — Gate 4 PASS, one-copy proven, memory 0.27 GiB**). This
+*Updated 2026-11-16 (01:05, **P3.7a — Gate 3 measured: the TPU stage is 25.8 % bit-exact, and
+the correct region is structural**). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
-`docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`).*
+`docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
+`docs/device/RESULTS_gate3_parity.md` (captures `gate3_parity_20261116_005432` / `…_010101`).*
 
 ## Mission
 
@@ -26,7 +28,8 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound |
 | Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg — no longer environment-blocked: `.venv-ref` (torch 2.15.0+cpu, diffusers 0.43.0) is installed, commit `8663c3f`** |
-| Gates 3–5 | pending |
+| **Gate 3 (parity)** | **measured, FAILS** → `docs/device/RESULTS_gate3_parity.md`, tool `tools/pipe/gate3_parity.py`, `proc_b --dump-parity/--act`. The TPU `FULLY_CONNECTED` returns the exact integer product for only **25.8 %** of each output tile: **the last 384-column block is bit-exact for every row and row 0 is bit-exact for every column**, everything else is not any FC result. Reference proved by those same bit-exact regions. Ruled out by measurement: async write (re-dump 150 ms later identical), buffer alignment (4096-aligned → bit-identical), transpose, row-stride, row/col permutation, n-shift, stale other-GEMM data, weight-byte echo |
+| Gates 4–5 | Gate 4 PASS (memory + one copy) |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
 | **Sustained `T_N`** | **measured** → `docs/device/RESULTS_sustain_npu.md`; 60 rounds × 9 GEMMs = **24.6 s of continuous TPU work, drift +0.35 %** (first-20 % 408.9 / last-20 % 410.3 ms per round, slope +0.03 ms/round) while the TPU zone rose 25.0 → 31.0 °C ⇒ **no derating over a full NPU stage**, so `T_N` carries no throttle term. Tool: `python tools/npu/sustain_npu.py` |
 | **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.61 s, 5.394× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
@@ -231,13 +234,33 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    46,399,488 B copy** of the block (`hv_block_int8.bin`, T_N-era) — removed with 128 MiB
    of other stale weight scratch, **137,502,720 B freed**; re-running `npu_block` needs
    its blobs re-pushed (no tool pushes them).
-   **NEXT ACTION (P3.7): the decode as an execution + Gate 3's parity.** `--decode 1` is
-   still a no-op stub and `proc_b` only *hashes* the payload it consumes. Wire the measured
-   10.554 s TPU decode into the NPU stage as real work (that also makes the period at
-   `k_b` = 160 a full-cut number instead of GPU-plus-20-blocks), and compare one block's
-   INT8 output against an int32 reference computed on the host, so Gate 3 has a number
-   rather than a hash. Gate 1's end-to-end PSNR/SSIM leg and `calibrate.py` remain
-   host-only work for a tick when the phone is absent or hot.
+   **P3.7a DONE 2026-11-16 01:01 — Gate 3 measured and it FAILS** →
+   `docs/device/RESULTS_gate3_parity.md`, `tools/pipe/gate3_parity.py`,
+   `proc_b --dump-parity DIR --act payload|basis|window`. `proc_b` now dumps, per
+   GEMM, the exact int8 activation each graph consumed and the int8 output it
+   produced; the host recomputes `acc = Σ a·w` **exactly** (fp32 BLAS, K-split
+   partials < 2^24, int64 accumulate; verified against brute-force int64
+   including the all-−128 worst case) and applies NNAPI's requant
+   `clamp(round(acc/127))`. Result: **25.8 % of each output tile is bit-exact**,
+   and the correct region is structural — **the last 384-column block is exact
+   for every row and row 0 is exact for every column** (`attn1.to_q` blocks
+   1.1/1.1/1.1/**100 %**; rows 1…383 correct only in the last block). `ffn.up`
+   is worse: 22 of 24 blocks at 1.4 %, then 45 %/92 %. The bit-exact regions are
+   what prove the host reference, so this is the HAL, not the model. Ruled out by
+   measurement: async write (150 ms re-dump identical), 4096-aligned output
+   buffer (bit-identical), transpose, row stride, row/col permutation, n-shift,
+   stale other-GEMM data, weight-byte echo. The dense payload saturates 45 % of
+   outputs, which is why `--act basis` exists (every output then equals a stored
+   weight byte). No lock touched, no rate edited: `T_N` was always declared
+   latency-only.
+   **NEXT ACTION (P3.7b): bisect the HAL with a single-output-tile graph** —
+   one `FULLY_CONNECTED` at `N = 384` (one block), `M = TILE`, basis activations.
+   100 % exact ⇒ the break is the multi-output-block path, fix = one graph per
+   384-column block (4 compilations, which also re-prices `T_N` honestly); still
+   25 % ⇒ the break is the `M = 384` row path, next probe `M = 1`.
+   Still unrun after that: `--decode 1` remains a **no-op stub** (the measured
+   10.554 s TPU decode is cited, not executed) and Gate 1's PSNR/SSIM leg +
+   `calibrate.py` are the host-only work for a tick when the phone is absent/hot.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
@@ -297,6 +320,17 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   that every one resolves to the same path and that only one file of that size exists on
   the device (a leftover T_N-era `hv_block_int8.bin` broke the one-copy claim until it was
   deleted).
+- **A `FULLY_CONNECTED` output is only partly the GEMM.** Measured 2026-11-16
+  (`RESULTS_gate3_parity.md`): **25.8 %** of each `[384, N]` output tile is bit-exact
+  against exact integer accumulation — the **last 384-column block** for every row and
+  **row 0** for every column — and the rest is data that is not any FC result over these
+  weights (not another GEMM's, not weight bytes). For `ffn.up` (N=8960) the tail blocks are
+  45 %/92 % rather than 100 %. Not an async write (150 ms re-dump identical), not buffer
+  alignment (4096-aligned output → bit-identical), not transpose/stride/permutation/shift.
+  **Consequence: measure latency with this stage, never numerical correctness.**
+  `--act basis` (`A[r][r]=127` ⇒ every output equals a stored weight byte) is the probe
+  that makes the check information-rich; the dense residual saturates 45 % of outputs at
+  `SA = 1/127` and hides the failure in rounding noise.
 
 ## Definition of done for the course project
 

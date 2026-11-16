@@ -166,6 +166,16 @@ static inline std::uint64_t fnv(std::uint64_t h, const void* p, size_t n) {
     return h;
 }
 
+// Gate 3 evidence: raw int8 bytes to disk, so the host can recompute the same
+// product with exact integer arithmetic instead of trusting a hash.
+static bool write_blob(const char* path, const void* p, size_t n) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    const size_t w = fwrite(p, 1, n, f);
+    fclose(f);
+    return w == n;
+}
+
 // ------------------------------------------------------------------- builder
 struct Holder {
     ANeuralNetworksModel* m = nullptr;
@@ -401,6 +411,8 @@ struct Args {
     int nblocks = 1;               // NPU blocks per chunk (the cut's 180 - k)
     int M = 1530;                  // tokens per chunk
     int decode = 1;                // emit the decode budget line
+    std::string dump_parity;       // DIR: dump tile 0's int8 in/out per GEMM (Gate 3)
+    std::string act = "payload";   // payload | basis | window (Gate 3 probe activations)
     int hash_every = 1;            // hash ffn.up's 13.7 MB output every N blocks (0 = never)
                                   // 1 = every block (the P3.3/P3.4 behaviour, ~80 ms dead
                                   // gap per block measured there)
@@ -423,10 +435,13 @@ static Args parse(int argc, char** argv) {
         else if (k == "--nblocks") a.nblocks = atoi(val("--nblocks").c_str());
         else if (k == "--M") a.M = atoi(val("--M").c_str());
         else if (k == "--decode") a.decode = atoi(val("--decode").c_str());
+        else if (k == "--dump-parity") a.dump_parity = val("--dump-parity");
+        else if (k == "--act") a.act = val("--act");
         else if (k == "--hash-every") a.hash_every = atoi(val("--hash-every").c_str());
         else if (k == "--help" || k == "-h") {
             P("usage: proc_b --block B [--scales S] [--ring R] [--blocks N] [--nblocks N] [--M 1530]"
-              " [--down skip|stage] [--source fork|none] [--decode 0|1] [--hash-every N]");
+              " [--down skip|stage] [--source fork|none] [--decode 0|1] [--hash-every N]"
+              " [--dump-parity DIR] [--act payload|basis|window]");
             std::exit(0);
         } else { P("FATAL|unknown_arg|%s", k.c_str()); std::exit(2); }
     }
@@ -599,7 +614,10 @@ int main(int argc, char** argv) {
 
     // ---- work buffers
     std::vector<int8_t> A((size_t)tiles * TILE * KD, 0);          // int8 activation, [tiles*TILE, KD]
-    std::vector<int8_t> Obuf((size_t)TILE * NUP, 0);              // per-tile GEMM scratch (max N = ffn.up)
+    // 4096-byte aligned: testing whether the HAL's output copy-back is sensitive
+    // to buffer alignment (the parity dump shows only part of the tile landing).
+    static int8_t Obuf_store[(size_t)TILE * NUP] __attribute__((aligned(4096)));
+    int8_t* Obuf = Obuf_store;                                    // per-tile GEMM scratch (max N = ffn.up)
     std::vector<int8_t> UpOut((size_t)tiles * TILE * NUP, 0);     // ffn.up output, per tile (down's input)
     std::vector<int8_t> Dacc((size_t)TILE * KD, 0), Dping((size_t)TILE * KD, 0);
     std::vector<std::vector<int8_t>> Dchunk(DCH, std::vector<int8_t>((size_t)TILE * KD, 0));
@@ -651,6 +669,26 @@ int main(int argc, char** argv) {
 
         // fp16 residual -> INT8 activation at SA, rows padded to tiles*TILE
         const std::uint64_t q0 = hv::now_ns();
+        if (a.act != "payload") {
+            // Gate 3 probe activations. The dense residual saturates ~45 % of the
+            // int8 outputs at SA = SW = 1/127, which makes an elementwise parity
+            // check information-poor; these patterns keep every output in range
+            // and make the device's pairing directly checkable on the host:
+            //   basis   A[r][r % K] = 127      => out[r][n] = W[n][r % K] exactly
+            //   window  A[r][8*(r%192) + j] = 1 => out[r][n] = round(sum of 8 w / 127)
+            std::fill(A.begin(), A.end(), (int8_t)0);
+            const int rows = tiles * TILE;
+            for (int r = 0; r < rows; ++r) {
+                int8_t* d = &A[(size_t)r * KD];
+                if (a.act == "basis") {
+                    d[r % KD] = 127;
+                } else {
+                    const int off = 8 * (r % 192);
+                    for (int j = 0; j < 8 && off + j < KD; ++j) d[off + j] = 1;
+                }
+            }
+            P("ACT|mode=%s|rows=%d|K=%d", a.act.c_str(), rows, KD);
+        } else {
         std::fill(A.begin(), A.end(), (int8_t)0);
         for (int t = 0; t < a.M; ++t) {
             int8_t* dst = &A[(size_t)t * KD];
@@ -661,6 +699,7 @@ int main(int argc, char** argv) {
                 else if (q < -128) q = -128;
                 dst[k] = (int8_t)q;
             }
+        }
         }
         const double quant_ms = (hv::now_ns() - q0) / 1e6;
         quant_ms_total += quant_ms;
@@ -674,7 +713,7 @@ int main(int argc, char** argv) {
                     const int8_t* in = &A[(size_t)t * TILE * KD];
                     // ffn.up keeps its per-tile output (ffn.down consumes it); every
                     // other GEMM writes into the shared scratch tile.
-                    int8_t* dst = (g == 8) ? &UpOut[(size_t)t * TILE * NUP] : Obuf.data();
+                    int8_t* dst = (g == 8) ? &UpOut[(size_t)t * TILE * NUP] : Obuf;
                     double ms = 0;
                     const int erc = exec_fc(slots[g], TILE, in, dst, &ms);
                     if (erc) {
@@ -686,6 +725,42 @@ int main(int argc, char** argv) {
                     ms_sum += ms;
                     gsum[g] += ms;
                     ++gcalls;
+                    // Gate 3: dump the first block's first tile, per GEMM — the
+                    // exact int8 activation the graph saw and the int8 output it
+                    // produced. The host recomputes the product exactly.
+                    if (t == 0 && b == 0 && chunk == 1 && !a.dump_parity.empty()) {
+                        ::mkdir(a.dump_parity.c_str(), 0777);
+                        char fi[512], fo[512];
+                        snprintf(fi, sizeof fi, "%s/%02d_%s_in.bin",
+                                 a.dump_parity.c_str(), g, GEMMS[g].name);
+                        snprintf(fo, sizeof fo, "%s/%02d_%s_out.bin",
+                                 a.dump_parity.c_str(), g, GEMMS[g].name);
+                        const size_t inb = (size_t)TILE * (size_t)GEMMS[g].K;
+                        const size_t outb = (size_t)TILE * (size_t)GEMMS[g].N;
+                        const bool oki = write_blob(fi, in, inb);
+                        const bool oko = write_blob(fo, dst, outb);
+                        P("PARITY|g=%d|gemm=%s|N=%d|K=%d|M=%d|in_bytes=%zu|out_bytes=%zu"
+                          "|fnv_in=%016" PRIx64 "|fnv_out=%016" PRIx64 "|ok=%d",
+                          g, GEMMS[g].name, GEMMS[g].N, GEMMS[g].K, TILE, inb, outb,
+                          fnv(FNV0, in, inb), fnv(FNV0, dst, outb),
+                          (oki && oko) ? 1 : 0);
+                        // Is the output written asynchronously? Re-dump after a
+                        // delay (g=0 only): if the bytes change, compute() returns
+                        // before the HAL has finished writing and every dump
+                        // raced the writer.
+                        if (g == 0) {
+                            const std::uint64_t h_before = fnv(FNV0, dst, outb);
+                            usleep(150 * 1000);
+                            char f2[512];
+                            snprintf(f2, sizeof f2, "%s/%02d_%s_out2.bin",
+                                     a.dump_parity.c_str(), g, GEMMS[g].name);
+                            const std::uint64_t h_after = fnv(FNV0, dst, outb);
+                            const bool ok2 = write_blob(f2, dst, outb);
+                            P("PARITY2|g=%d|fnv_at_dump=%016" PRIx64 "|fnv_after_150ms=%016" PRIx64
+                              "|changed=%d|ok=%d",
+                              g, h_before, h_after, h_before == h_after ? 0 : 1, ok2 ? 1 : 0);
+                        }
+                    }
                 }
                 if (proto_err) break;
                 gsum_block += ms_sum;
