@@ -419,6 +419,15 @@ struct Args {
     std::string probe_dir;         // DIR: Gate 3 bisect — single/multi output-block graphs
     int probe_g = 0;               // GEMM index the bisect probes (0 = attn1.to_q)
     std::string probe_plan;        // "M,N,col0;M,N,col0;..." overrides the default sweep
+    // P3.7c — cost of the only *bit-exact* recipe measured on this HAL:
+    // one graph per 384-column output block, row tiles of <= 200.
+    int recipe = 0;
+    int recipe_row = 192;          // <= 200 (measured exact ceiling), divides 1536
+    int recipe_col = 384;          // measured exact block width
+    int recipe_tokens = 1536;      // tokens per Preset-A block (4 x TILE, the stage's unit)
+    int recipe_reps = 3;
+    std::string recipe_gemms = "0,1,2,3,4,5,6,7,8";
+    std::string recipe_dump;       // DIR: dump each graph's int8 output on pass 1
 };
 
 static Args parse(int argc, char** argv) {
@@ -444,6 +453,13 @@ static Args parse(int argc, char** argv) {
         else if (k == "--probe-dir") a.probe_dir = val("--probe-dir");
         else if (k == "--probe-g") a.probe_g = atoi(val("--probe-g").c_str());
         else if (k == "--probe-plan") a.probe_plan = val("--probe-plan");
+        else if (k == "--recipe") a.recipe = atoi(val("--recipe").c_str());
+        else if (k == "--recipe-row") a.recipe_row = atoi(val("--recipe-row").c_str());
+        else if (k == "--recipe-col") a.recipe_col = atoi(val("--recipe-col").c_str());
+        else if (k == "--recipe-tokens") a.recipe_tokens = atoi(val("--recipe-tokens").c_str());
+        else if (k == "--recipe-reps") a.recipe_reps = atoi(val("--recipe-reps").c_str());
+        else if (k == "--recipe-gemms") a.recipe_gemms = val("--recipe-gemms");
+        else if (k == "--recipe-dump") a.recipe_dump = val("--recipe-dump");
         else if (k == "--help" || k == "-h") {
             P("usage: proc_b --block B [--scales S] [--ring R] [--blocks N] [--nblocks N] [--M 1530]"
               " [--down skip|stage] [--source fork|none] [--decode 0|1] [--hash-every N]"
@@ -584,6 +600,148 @@ static int run_probe(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem, co
     return fails ? 1 : 0;
 }
 
+// ------------------------------------------------------- exact-recipe cost (P3.7c)
+// P3.7b measured the only configuration this HAL returns *exactly*: one graph
+// per 384-column output block, row tiles of <= 200 rows. That recipe costs more
+// dispatches than the 9-graph stage (which is 25.8 % bit-exact), so the cost of
+// the exact one has to be measured before any cut argument uses it.
+//
+// What makes the recipe affordable at all: a graph is shape-defined, and the
+// only operand that changes per **column block** is the constant weight window
+// (`off + col0*K`, still a window into the one file-mapped artifact). So the
+// compilation count is the number of column blocks, NOT rows x columns x GEMMs —
+// the same M=192 graph is re-executed with each row tile's activation slice.
+//
+//   56 compilations (8 x 4 + 24) and 448 executes for a 1536-token block.
+//
+// Activations are the `basis` pattern (A[r][r%K] = 127): no saturation, and the
+// exact output is one stored weight byte, so this run is comparable with the
+// parity captures. Latency only — parity was measured shape by shape in P3.7b.
+struct RecipeCol { int N, col0; };
+
+static int run_recipe(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem, const Args& a) {
+    const int ROW = a.recipe_row, COL = a.recipe_col, TOK = a.recipe_tokens;
+    const int reps = a.recipe_reps > 0 ? a.recipe_reps : 1;
+    const int nrow = (TOK + ROW - 1) / ROW;
+
+    std::vector<int> gs;
+    {
+        size_t pos = 0;
+        const std::string& s = a.recipe_gemms;
+        while (pos < s.size()) {
+            size_t sep = s.find(',', pos);
+            const std::string it = s.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
+            if (!it.empty()) gs.push_back(atoi(it.c_str()));
+            if (sep == std::string::npos) break;
+            pos = sep + 1;
+        }
+    }
+    if (gs.empty()) { P("FATAL|recipe_no_gemms"); return 2; }
+    if (!a.recipe_dump.empty()) ::mkdir(a.recipe_dump.c_str(), 0777);
+    P("RECIPE|plan|row=%d|col=%d|tokens=%d|row_tiles=%d|reps=%d|gemms=%zu|act=basis", ROW, COL, TOK,
+      nrow, reps, gs.size());
+    if (ROW > 200 || (ROW % 8) != 0) P("WARN|recipe_row_above_measured_exact_ceiling|row=%d", ROW);
+
+    // basis activation, TOK rows padded up to row tiles
+    std::vector<int8_t> A((size_t)nrow * ROW * KD, 0);
+    for (int r = 0; r < nrow * ROW; ++r) A[(size_t)r * KD + (r % KD)] = 127;
+
+    double compile_all = 0;
+    int fails = 0;
+    std::vector<double> pass_tot((size_t)reps + 1, 0.0);
+    std::uint64_t execs_per_pass = 0;
+
+    for (size_t gi = 0; gi < gs.size(); ++gi) {
+        const int g = gs[gi];
+        if (g < 0 || g >= 9) { P("WARN|recipe_bad_gemm|%d|range=0..8", g); continue; }
+        const int NOUT = GEMMS[g].N, K = GEMMS[g].K;
+        if (K != KD) { P("FATAL|recipe_needs_K1536|%s|K=%d", GEMMS[g].name, K); return 2; }
+
+        std::vector<Slot> slots;
+        std::vector<int> cols;
+        int gfail = 0;
+        const std::uint64_t c0t = hv::now_ns();
+        for (int c0 = 0; c0 < NOUT; c0 += COL) {
+            const int n = std::min(COL, NOUT - c0);
+            const int64_t woff = GEMMS[g].off + (int64_t)c0 * (int64_t)K;
+            Slot s;
+            int last_rc = 0;
+            const int crc = compile_fc(tpu, ROW, n, K, WSrc{wmem, woff, nullptr},
+                                       GEMMS[g].name, g * 1000 + c0, &s, &last_rc);
+            if (crc) {
+                P("RECIPE|FAIL|g=%d|c0=%d|N=%d|stage=compile|rc=%d(%s)", g, c0, n, last_rc, rcs(last_rc));
+                ++gfail;
+                continue;
+            }
+            slots.push_back(s);
+            cols.push_back(c0);
+        }
+        const double gcms = (hv::now_ns() - c0t) / 1e6;
+        compile_all += gcms;
+        if (slots.empty()) { ++fails; P("RECIPE|FAIL|g=%d|stage=compile_all|fails=%d", g, gfail); continue; }
+        P("RECIPE|gemm|g=%d|name=%s|N_out=%d|K=%d|col_blocks=%zu|tiles_per_graph=%d|execs_per_pass=%zu"
+          "|compile_ms=%.1f|compile_fails=%d",
+          g, GEMMS[g].name, NOUT, K, slots.size(), nrow, slots.size() * (size_t)nrow, gcms, gfail);
+
+        std::vector<int8_t> out((size_t)ROW * (size_t)COL, 0);
+        for (int p = 1; p <= reps; ++p) {
+            double gtot = 0;
+            bool dead = false;
+            for (size_t i = 0; i < slots.size() && !dead; ++i) {
+                double ms_sum = 0, ms_min = 1e9, ms_max = 0;
+                int ok = 0;
+                for (int t = 0; t < nrow; ++t) {
+                    double ms = 0;
+                    const int erc = exec_fc(slots[i], ROW, &A[(size_t)t * ROW * KD], out.data(), &ms);
+                    if (erc) {
+                        P("RECIPE|FAIL|g=%d|c0=%d|pass=%d|tile=%d|stage=exec|rc=%d(%s)",
+                          g, cols[i], p, t, erc, rcs(erc));
+                        dead = true;
+                        break;
+                    }
+                    ms_sum += ms;
+                    if (ms < ms_min) ms_min = ms;
+                    if (ms > ms_max) ms_max = ms;
+                    ++ok;
+                    if (p == 1 && !a.recipe_dump.empty()) {
+                        char fo[512];
+                        snprintf(fo, sizeof fo, "%s/g%d_c%d_t%02d_out.bin",
+                                 a.recipe_dump.c_str(), g, cols[i], t);
+                        const size_t outb = (size_t)ROW * (size_t)slots[i].n;
+                        const bool okd = write_blob(fo, out.data(), outb);
+                        P("RECIPE|dump|g=%d|c0=%d|N=%d|tile=%d|bytes=%zu|fnv_out=%016" PRIx64 "|ok=%d",
+                          g, cols[i], slots[i].n, t, outb,
+                          fnv(FNV0, out.data(), outb), okd ? 1 : 0);
+                    }
+                }
+                if (dead) break;
+                gtot += ms_sum;
+                if (p == 1) execs_per_pass += (std::uint64_t)ok;
+                P("RECIPE|col|g=%d|c0=%d|N=%d|pass=%d|execs=%d|ms_tot=%.3f|ms_mean=%.3f|ms_min=%.3f"
+                  "|ms_max=%.3f|gops=%.1f",
+                  g, cols[i], slots[i].n, p, ok, ms_sum, ms_sum / ok, ms_min, ms_max,
+                  2.0 * (double)ok * ROW * slots[i].n * K / (ms_sum * 1e6));
+            }
+            if (dead) { ++fails; break; }
+            pass_tot[(size_t)p] += gtot;
+            P("RECIPE|pass|g=%d|name=%s|pass=%d|ms_tot=%.3f|gops=%.1f",
+              g, GEMMS[g].name, p, gtot,
+              2.0 * (double)nrow * ROW * NOUT * K / (gtot * 1e6));
+        }
+        for (size_t i = 0; i < slots.size(); ++i) {
+            ANeuralNetworksCompilation_free(slots[i].comp);
+            ANeuralNetworksModel_free(slots[i].model);
+        }
+    }
+
+    for (int p = 1; p <= reps; ++p)
+        P("SUMMARY|recipe|pass=%d|block_ms=%.3f|block_s=%.4f|execs=%" PRIu64 "|compile_ms=%.1f|fails=%d",
+          p, pass_tot[(size_t)p], pass_tot[(size_t)p] / 1000.0, execs_per_pass, compile_all, fails);
+    P("SUMMARY|recipe|gemms=%zu|graphs=%" PRIu64 "|reps=%d|row=%d|col=%d|tokens=%d|compile_ms=%.1f|fails=%d",
+      gs.size(), execs_per_pass / (std::uint64_t)nrow, reps, ROW, COL, TOK, compile_all, fails);
+    return fails ? 1 : 0;
+}
+
 // ------------------------------------------------------------- fork producer
 // Stands in for proc_a so this stage can be exercised alone: same ring, same
 // publish protocol, synthetic fp16 payload, and a hash chain the parent's chain
@@ -655,6 +813,14 @@ int main(int argc, char** argv) {
       a.block.c_str(), (long long)W_BYTES, a.M, tiles, TILE, a.blocks, a.nblocks,
       a.down.c_str(), a.source.c_str());
     P("NOTE|scales=%s|per_tensor_graphs(per_column_rejected)|latency_only", scl_note.c_str());
+
+    // ---- P3.7c: cost of the exact recipe (no ring, no producer, no decode).
+    if (a.recipe) {
+        const int rrc = run_recipe(tpu, wmem, a);
+        ANeuralNetworksMemory_free(wmem);
+        ::close(fd);
+        return rrc;
+    }
 
     // ---- Gate 3 bisect: standalone probe run, no ring, no producer, no decode.
     if (!a.probe_dir.empty()) {

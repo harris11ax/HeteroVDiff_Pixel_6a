@@ -258,3 +258,15 @@ the graphs executed on the accelerator rather than the CPU.
    not a shape property — a shape-only "equivalent path" restriction is not supportable, and
    per-tensor-where-cheap would cover only `attn2.to_k`+`attn2.to_v` = **10.2 % of block MACs**.
    **The choice stays the student's; both branches now have numbers.**
+
+6. **`T_N` on the exact recipe (P3.7c) — done 2026-11-16 01:36.** The only graph geometry this HAL
+   returns bit-exactly (P3.7b: `N ∈ {128,384,768}` × `M ≤ 200`) costs **0.7164 s/block** for the
+   nine GEMMs — **1.90× the 377.8 ms 9-graph stage, at 140 GOPS instead of 265**, **56
+   compilations (8.64 s) / 448 executes** per 1536-token block — and returns **448/448 tiles
+   bit-exact (Δ = 0 LSB)** including `ffn.up`'s tail-128 block, verified against the raw weight
+   bytes. Four runs, 0.3 % spread. → `docs/device/RESULTS_tn_recipe.md`, tool
+   `tools/pipe/tn_recipe.py`, capture `tn_recipe_20261116_013625`. `solve_cut.py` on the measured
+   pair gives `k_b* = 166`, period 24.47 s (**+3.6 %** for a correct stage); **reported, not
+   applied** — the 0.7164 is solo and the locked 0.6484 is co-run. **Next: the co-run treatment of
+   the exact recipe** (and, if it survives, the 8.64 s/block compile amortised over the 10-chunk
+   run).

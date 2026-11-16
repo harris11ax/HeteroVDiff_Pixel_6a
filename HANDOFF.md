@@ -1,12 +1,14 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (01:25, **P3.7b — the Gate 3 failure is localized: it is the M row tile, and an
-exact 100 % recipe now exists**). This
+*Updated 2026-11-16 (01:36, **P3.7c — the bit-exact NPU stage is measured: 0.7164 s/block, and it
+is exact at 448/448 tiles**). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
 `docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
-`docs/device/RESULTS_gate3_parity.md` (captures `gate3_parity_20261116_005432` / `…_010101`) and its
-bisect is `docs/device/RESULTS_gate3_bisect.md` (captures `gate3_bisect_20261116_012157` … `_012349`).*
+`docs/device/RESULTS_gate3_parity.md` (captures `gate3_parity_20261116_005432` / `…_010101`), its
+bisect is `docs/device/RESULTS_gate3_bisect.md` (captures `gate3_bisect_20261116_012157` … `_012349`),
+and the cost of the exact recipe is `docs/device/RESULTS_tn_recipe.md` (4 runs,
+`tn_recipe_20261116_013019` … `_013625`).*
 
 ## Mission
 
@@ -29,8 +31,9 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound |
 | Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg — no longer environment-blocked: `.venv-ref` (torch 2.15.0+cpu, diffusers 0.43.0) is installed, commit `8663c3f`** |
-| **Gate 3 (parity)** | **measured, FAILS as configured — but LOCALIZED and a passing recipe exists** → `docs/device/RESULTS_gate3_parity.md` + `docs/device/RESULTS_gate3_bisect.md`, tools `tools/pipe/gate3_parity.py`, `tools/pipe/gate3_bisect.py`, `proc_b --dump-parity/--probe-dir/--act`. The break is the **M (row) direction**: `N = 384` graphs are **100.00 % bit-exact (Δ = 0, 0 elements off by ≥2)** at `M = 1/8/128/160/192/200`, `N = 768` at `M = 128`, `N = 1536` at `M = 1`, on both `attn1.to_q` and `ffn.up`; the same 384-column graph at `M = 384` **will not compile** (`OP_FAILED`, ~58 ms). Wide graphs at `M = 256…384` return 25.8–50.7 %. So the fix Gate 3 proposed ("one graph per 384-column block") is the exact graph this compiler refuses, and the exact recipe is `N ∈ {128,384,768}` × `M ≤ 200` = **112 executes/block** instead of 9 — **cost unmeasured** |
+| **Gate 3 (parity)** | **measured, FAILS as configured — but LOCALIZED and a passing recipe exists** → `docs/device/RESULTS_gate3_parity.md` + `docs/device/RESULTS_gate3_bisect.md`, tools `tools/pipe/gate3_parity.py`, `tools/pipe/gate3_bisect.py`, `proc_b --dump-parity/--probe-dir/--act`. The break is the **M (row) direction**: `N = 384` graphs are **100.00 % bit-exact (Δ = 0, 0 elements off by ≥2)** at `M = 1/8/128/160/192/200`, `N = 768` at `M = 128`, `N = 1536` at `M = 1`, on both `attn1.to_q` and `ffn.up`; the same 384-column graph at `M = 384` **will not compile** (`OP_FAILED`, ~58 ms). Wide graphs at `M = 256…384` return 25.8–50.7 %. So the fix Gate 3 proposed ("one graph per 384-column block") is the exact graph this compiler refuses, and the exact recipe is `N ∈ {128,384,768}` × `M ≤ 200` = **112 executes/block** instead of 9 at 384 tokens (**448 executes / 56 compilations at the stage's 1536 tokens; cost now measured in P3.7c**) |
 | Gates 4–5 | Gate 4 PASS (memory + one copy) |
+| **Exact recipe `T_N` (P3.7c)** | **measured** → `docs/device/RESULTS_tn_recipe.md`: the only bit-exact geometry (P3.7b) costs **0.7164 s/block** for the nine GEMMs = **1.90× the 377.8 ms 9-graph stage**, **140 GOPS** vs 265, at **56 compilations (8.64 s) / 448 executes** per block — and returns **448/448 tiles bit-exact (Δ = 0 LSB)**, `ffn.up`'s tail-128 block included, checked byte-wise against the artifact. 4 runs, 0.3 % spread. `solve_cut.py` on the measured pair: `k_b* = 166`, period **24.47 s (+3.6 %)** — **reported, not applied** (solo vs the locked co-run number) |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
 | **Sustained `T_N`** | **measured** → `docs/device/RESULTS_sustain_npu.md`; 60 rounds × 9 GEMMs = **24.6 s of continuous TPU work, drift +0.35 %** (first-20 % 408.9 / last-20 % 410.3 ms per round, slope +0.03 ms/round) while the TPU zone rose 25.0 → 31.0 °C ⇒ **no derating over a full NPU stage**, so `T_N` carries no throttle term. Tool: `python tools/npu/sustain_npu.py` |
 | **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.61 s, 5.394× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
@@ -269,9 +272,19 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    (23×384 + tail 128 at `col0=8832`, also 100 %) for `ffn.up` ⇒ **112 executes/block vs 9 today**.
    Indicative (2 executes, ungated, *not* table-grade) warm exec 1.54–1.69 ms per `M=192×N=384`
    graph, 1.18–1.24 ms per `M=192×N=128`, 22.95 ms for one `M=192×N=8960` — extrapolated ≈0.18 s
-   per exact block, *below* the 377.8 ms the current 9-graph stage costs. **NEXT ACTION (P3.7c):
-   measure `T_N` on the exact recipe properly** — repeated executes per graph, thermal gate via
-   `tools/npu/cool_rerun.py`, then the same co-run treatment, before any cut argument uses it.
+   per exact block, *below* the 377.8 ms the current 9-graph stage costs.
+   **P3.7c DONE 2026-11-16 01:36 — cost and exactness measured** → `docs/device/RESULTS_tn_recipe.md`,
+   tool `tools/pipe/tn_recipe.py`, `proc_b --recipe 1 [--recipe-dump DIR]`, captures
+   `tn_recipe_20261116_013019` … `_013625` (4 runs). One graph per column block at `M = 192` over
+   1536 tokens = **56 compilations + 448 executes per block**: **0.7164 s/block**
+   (715.8/717.2/717.8/716.4 ms, 0.3 % spread; pass 1 777–815 ms cold), **140 GOPS vs 265** for the
+   9-graph stage ⇒ **1.90× its 377.8 ms**, and **448/448 dumped tiles bit-exact (Δ = 0 LSB)**
+   including `ffn.up`'s tail-128 block. Compile **8.64 s per block** (154 ms/graph), separable
+   from exec and amortisable if the graphs survive across chunks. `solve_cut.py` with `T_N` =
+   0.7164 + 0.2580 downsep → **k_b\* = 166, period 24.47 s (+3.6 %)**, reported not applied.
+   **NEXT ACTION (P3.7d): the co-run treatment of the exact recipe** — 0.7164 is solo and the
+   locked 0.6484 is co-run, so no cut argument may use it until both engines run together
+   (`tools/corun/co_run.py`). Then re-run `solve_cut.py`.
    Also unproven: the 100 % holds on blocks other than `block_00`, and on `ffn.down` (K=8960).
    Still unrun after that: `--decode 1` remains a **no-op stub** (the measured
    10.554 s TPU decode is cited, not executed) and Gate 1's PSNR/SSIM leg +
