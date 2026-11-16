@@ -212,6 +212,7 @@ def main() -> int:
 
     temps_before: dict = {}
     temps_after: dict = {}
+    uptime_s = None
     gate_ok = False
     stage = "unknown"
     dump_res = None
@@ -248,6 +249,14 @@ def main() -> int:
             batt = temps_before.get("battery")
             print(f"  [gate] NO TIMED RUN: peak {peak} vs battery+3 {None if batt is None else batt + 3}")
             return 3
+
+        rc, up_txt = adb(serial, "shell cat /proc/uptime")
+        try:
+            uptime_s = float(up_txt.split()[0])
+        except (ValueError, IndexError):
+            uptime_s = None
+        print(f"  device uptime {uptime_s:.0f} s (a rate is only comparable inside one boot)"
+              if uptime_s else "  device uptime unreadable")
 
         rc, txt = run([str(ADB), "-s", serial, "push", str(PIPE_BIN), REMOTE_BIN], timeout=600)
         if rc != 0:
@@ -358,7 +367,8 @@ def main() -> int:
         "timestamp": ts, "serial": serial, "stage": "P3.7c exact-recipe T_N",
         "block_file": f"block_{args.block_idx:02d}.bin", "block_bytes": BLOCK_BYTES,
         "plan": {"row": row, "col": col, "tokens": tokens, "row_tiles": nrow, "reps": reps,
-                 "gemms": args.gemms},
+                 "gemms": args.gemms, "order": args.order},
+        "device_uptime_s": uptime_s,
         "compiles": compiles, "execs_per_pass": execs,
         "compile_ms": compile_ms,
         "block_ms_per_pass": block_ms,
@@ -440,6 +450,9 @@ def main() -> int:
     L += ["", "## Thermal", "",
           "- before: " + (zone_line(temps_before) if temps_before else "not sampled"),
           "- after:  " + (zone_line(temps_after) if temps_after else "not sampled"),
+          f"- device uptime at start: **{uptime_s:.0f} s**" if uptime_s else
+          "- device uptime at start: unreadable",
+          f"- execution order: **{args.order}** (both orders hold all 56 graphs)",
           f"- gate (`max zone <= battery+3`, slack {args.gate_slack:.1f} °C for the whole-degree "
           f"TPU sensor): **{'PASS at start' if gate_ok else 'NOT GATED'}**", "",
           "## What this proves / does not", "",
