@@ -1,5 +1,16 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
+*Updated 2026-11-16 (06:37, **P3.11 — the decode's wiring is measured, and the chain between two
+convs is NOT a rescale: it is a `WanRMS_norm` + SiLU.** `calibrate.py` now records the real per-layer
+OUTPUT range (the old `max_abs_out` was the whole decode's output, a flat 1.0) plus the POST-ADD range
+per resnet; `act_scales2_f32.bin` = 2×36 f32 (SA_in ++ SA_out), and `vae_wiring.json` +
+`norms_f32.bin` carry the 128-op plan and all 29 norm gammas. The 89× step between
+`mid_block.resnets.0.conv1` (max 54.79) and `.conv2` (max 0.612) is **proved** to be
+`F.normalize(dim=1)*sqrt(C)*gamma` then SiLU: hand-applied, it reproduces the consumer's measured
+input range to **0.00 %**. Also recorded: the artifact's layer index is a storage order, not an
+execution order (shortcut first in `forward`, last in the artifact). Host-only, no device number
+touched — the norm/SiLU/shuffle/add are still unexecuted. → `docs/device/RESULTS_vae_wiring.md`.*
+
 *Updated 2026-11-16 (06:10, **P3.10 — the measured per-layer activation scale is wired into the
 device: `convseq` now runs all 36 layers at their own `SA` (was `1/127` for every one), with real
 INT32 per-channel bias and the requant to the *consumer* layer's scale. 592/592 executes,
@@ -503,8 +514,32 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  touched, **no quality claim: it executes in the right numeric range, it still does not decode.**
  **NEXT ACTION: (a) `calibrate.py` must record the per-layer OUTPUT range (its `max_abs_out` reads a
  flat 1.0, so it was never a real output calibration) → table becomes 2 × 36 floats, and wire the
- residual/SiLU/clamp path — that is what turns "executes" into "decodes"; (b) `proc_b --decode 1`
- calls `convseq` instead of printing 10.640 s; (c) Gate 5, ≥10 chunks with the decode in it.**
+ residual/SiLU/clamp path — that is what turns "executes" into "decodes"** — **DONE host-side
+ 06:37, see P3.11 below**; (b) `proc_b --decode 1` calls `convseq` instead of printing 10.640 s;
+ (c) Gate 5, ≥10 chunks with the decode in it.**
+ **P3.11 DONE 2026-11-16 06:37 — the wiring is measured, and it is a NORM, not a rescale** →
+ `docs/device/RESULTS_vae_wiring.md`, tools `phase1_quant/vae_wiring.py` +
+ `phase1_quant/check_norm_path.py`, artifacts `artifacts/vae/{norms_f32.bin (31,104 B, 29 gammas,
+ 7,776 floats),vae_wiring.json (128 ops),act_scales2_f32.bin (288 B = 2×36 f32)}`. `calibrate.py`'s
+ output range is now a **forward** hook (`max_abs_out` was the whole decode's output = 1.0 for all
+ 36 rows) and `resnets[].max_abs_out` is the **post-add** tensor, which no conv owns. Measured:
+ **SA_in 0.004822…0.252453, SA_out 0.011217…0.431392, SA_out/SA_in 0.275…15.505 (median 1.305)**;
+ post-add range = **1.03×…4.76×** conv2's own (median 1.97×) ⇒ a residual add at conv2's scale
+ clips. The 89× step between `mid_block.resnets.0.conv1` (54.79) and `.conv2` (0.612) is
+ `WanRMS_norm` = `F.normalize(dim=1)*sqrt(C)*gamma` + SiLU: **hand-applied it gives 0.6124 vs the
+ measured 0.6124, rel 0.00 %** (PASS) — and two cross-checks agree for free (the post-add range of
+ `up_blocks.{0,1}.resnets.2` equals the following `time_conv`'s input range exactly; conv-less edges
+ like `time_conv→resample.1` agree to 0.98/1.00 while norm-bearing ones span 0.17–89). Plan:
+ 36 conv + 29 norm + 29 SiLU + 14 save + 14 add + 2 temporal_shuffle + 3 upsample2d + 1 attn.
+ **Ordering defect recorded:** the artifact indexes `conv1,conv2,conv_shortcut` but `forward` applies
+ the shortcut FIRST ⇒ the SA table's index order is a storage order, not an execution order (3
+ positions differ, all `decoder.up_blocks.1.resnets.0`); every conv op now carries `artifact_index`.
+ **Not wired into `convseq` yet** — norm/SiLU/shuffle/upsample/add are unexecuted, so the decode
+ still executes without decoding, no quality claim, and no device rate changed.
+ **NEXT ACTION (device, one bounded unit): implement the P3.11 plan in `convseq`** — per-layer
+ `sa_in`/`sa_out` from `act_scales2_f32.bin`, the L2-over-channels norm with `norms_f32.bin`, SiLU,
+ the temporal shuffle, the 3 2-D upsample convs and the 14 residual adds at `post_add_sa`; then a
+ floor-started walk. After that: `proc_b --decode 1` → `convseq`, then Gate 5.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)

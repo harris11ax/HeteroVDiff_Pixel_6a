@@ -1,6 +1,6 @@
 # Calibration — `SA = max|x| / 127`, the activation scale (deliverable 4)
 
-built `20261116_054430` on `.venv-ref` (torch 2.15.0+cpu), host only, no device involved.
+built `20261116_063707` on `.venv-ref` (torch 2.15.0+cpu), host only, no device involved.
 
 ## VAE decoder — 36 layers
 
@@ -8,44 +8,65 @@ latent `[1, 16, 3, 34, 60]` seed 0; every layer's scale is measured on the activ
 
 `SA` range **0.004822 … 0.252453** (spread 52.36x) against the placeholder `1/127 = 0.007874`.
 
-| layer | in shape | max&#124;x&#124; | SA | vs 1/127 |
-|---|---|---|---|---|
-| `conv_in` | [1, 16, 1, 34, 60] | 2.522 | 0.019856 | 2.52x |
-| `mid_block.resnets.0.conv1` | [1, 384, 1, 34, 60] | 4.653 | 0.036640 | 4.65x |
-| `mid_block.resnets.0.conv2` | [1, 384, 1, 34, 60] | 0.612 | 0.004822 | 0.61x |
-| `mid_block.resnets.1.conv1` | [1, 384, 1, 34, 60] | 2.635 | 0.020750 | 2.64x |
-| `mid_block.resnets.1.conv2` | [1, 384, 1, 34, 60] | 0.776 | 0.006107 | 0.78x |
-| `up_blocks.0.resnets.0.conv1` | [1, 384, 1, 34, 60] | 6.109 | 0.048100 | 6.11x |
-| `up_blocks.0.resnets.0.conv2` | [1, 384, 1, 34, 60] | 1.229 | 0.009673 | 1.23x |
-| `up_blocks.0.resnets.1.conv1` | [1, 384, 1, 34, 60] | 5.045 | 0.039722 | 5.04x |
-| `up_blocks.0.resnets.1.conv2` | [1, 384, 1, 34, 60] | 5.428 | 0.042738 | 5.43x |
-| `up_blocks.0.resnets.2.conv1` | [1, 384, 1, 34, 60] | 4.341 | 0.034180 | 4.34x |
-| `up_blocks.0.resnets.2.conv2` | [1, 384, 1, 34, 60] | 4.782 | 0.037653 | 4.78x |
-| `up_blocks.0.upsamplers.0.time_conv` | [1, 384, 1, 34, 60] | 7.630 | 0.060082 | 7.63x |
-| `up_blocks.0.upsamplers.0.resample.1` | [2, 384, 68, 120] | 7.469 | 0.058815 | 7.47x |
-| `up_blocks.1.resnets.0.conv1` | [1, 192, 2, 68, 120] | 15.479 | 0.121884 | 15.48x |
-| `up_blocks.1.resnets.0.conv2` | [1, 384, 2, 68, 120] | 4.158 | 0.032742 | 4.16x |
-| `up_blocks.1.resnets.0.conv_shortcut` | [1, 192, 2, 68, 120] | 32.062 | 0.252453 | 32.06x |
-| `up_blocks.1.resnets.1.conv1` | [1, 384, 2, 68, 120] | 5.334 | 0.042004 | 5.33x |
-| `up_blocks.1.resnets.1.conv2` | [1, 384, 2, 68, 120] | 6.111 | 0.048119 | 6.11x |
-| `up_blocks.1.resnets.2.conv1` | [1, 384, 2, 68, 120] | 4.581 | 0.036074 | 4.58x |
-| `up_blocks.1.resnets.2.conv2` | [1, 384, 2, 68, 120] | 6.132 | 0.048280 | 6.13x |
-| `up_blocks.1.upsamplers.0.time_conv` | [1, 384, 2, 68, 120] | 14.045 | 0.110594 | 14.05x |
-| `up_blocks.1.upsamplers.0.resample.1` | [4, 384, 136, 240] | 11.524 | 0.090739 | 11.52x |
-| `up_blocks.2.resnets.0.conv1` | [1, 192, 4, 136, 240] | 4.171 | 0.032841 | 4.17x |
-| `up_blocks.2.resnets.0.conv2` | [1, 192, 4, 136, 240] | 6.661 | 0.052448 | 6.66x |
-| `up_blocks.2.resnets.1.conv1` | [1, 192, 4, 136, 240] | 3.872 | 0.030490 | 3.87x |
-| `up_blocks.2.resnets.1.conv2` | [1, 192, 4, 136, 240] | 6.743 | 0.053093 | 6.74x |
-| `up_blocks.2.resnets.2.conv1` | [1, 192, 4, 136, 240] | 3.155 | 0.024841 | 3.15x |
-| `up_blocks.2.resnets.2.conv2` | [1, 192, 4, 136, 240] | 5.722 | 0.045058 | 5.72x |
-| `up_blocks.2.upsamplers.0.resample.1` | [4, 192, 272, 480] | 27.088 | 0.213290 | 27.09x |
-| `up_blocks.3.resnets.0.conv1` | [1, 96, 4, 272, 480] | 3.538 | 0.027856 | 3.54x |
-| `up_blocks.3.resnets.0.conv2` | [1, 96, 4, 272, 480] | 4.834 | 0.038064 | 4.83x |
-| `up_blocks.3.resnets.1.conv1` | [1, 96, 4, 272, 480] | 3.756 | 0.029578 | 3.76x |
-| `up_blocks.3.resnets.1.conv2` | [1, 96, 4, 272, 480] | 5.942 | 0.046785 | 5.94x |
-| `up_blocks.3.resnets.2.conv1` | [1, 96, 4, 272, 480] | 4.214 | 0.033179 | 4.21x |
-| `up_blocks.3.resnets.2.conv2` | [1, 96, 4, 272, 480] | 5.321 | 0.041895 | 5.32x |
-| `conv_out` | [1, 96, 4, 272, 480] | 3.884 | 0.030584 | 3.88x |
+| layer | in shape | max&#124;x&#124; | SA_in | SA_out | out/in | max&#124;x_out&#124; |
+|---|---|---|---|---|---|---|
+| `conv_in` | [1, 16, 1, 34, 60] | 2.522 | 0.019856 | 0.012566 | 0.63x | 1.596 |
+| `mid_block.resnets.0.conv1` | [1, 384, 1, 34, 60] | 4.653 | 0.036640 | 0.431392 | 11.77x | 54.787 |
+| `mid_block.resnets.0.conv2` | [1, 384, 1, 34, 60] | 0.612 | 0.004822 | 0.074764 | 15.51x | 9.495 |
+| `mid_block.resnets.1.conv1` | [1, 384, 1, 34, 60] | 2.635 | 0.020750 | 0.094050 | 4.53x | 11.944 |
+| `mid_block.resnets.1.conv2` | [1, 384, 1, 34, 60] | 0.776 | 0.006107 | 0.028660 | 4.69x | 3.640 |
+| `up_blocks.0.resnets.0.conv1` | [1, 384, 1, 34, 60] | 6.109 | 0.048100 | 0.062188 | 1.29x | 7.898 |
+| `up_blocks.0.resnets.0.conv2` | [1, 384, 1, 34, 60] | 1.229 | 0.009673 | 0.026496 | 2.74x | 3.365 |
+| `up_blocks.0.resnets.1.conv1` | [1, 384, 1, 34, 60] | 5.045 | 0.039722 | 0.049370 | 1.24x | 6.270 |
+| `up_blocks.0.resnets.1.conv2` | [1, 384, 1, 34, 60] | 5.428 | 0.042738 | 0.036527 | 0.85x | 4.639 |
+| `up_blocks.0.resnets.2.conv1` | [1, 384, 1, 34, 60] | 4.341 | 0.034180 | 0.056225 | 1.64x | 7.141 |
+| `up_blocks.0.resnets.2.conv2` | [1, 384, 1, 34, 60] | 4.782 | 0.037653 | 0.030339 | 0.81x | 3.853 |
+| `up_blocks.0.upsamplers.0.time_conv` | [1, 384, 1, 34, 60] | 7.630 | 0.060082 | 0.057658 | 0.96x | 7.323 |
+| `up_blocks.0.upsamplers.0.resample.1` | [2, 384, 68, 120] | 7.469 | 0.058815 | 0.252453 | 4.29x | 32.062 |
+| `up_blocks.1.resnets.0.conv1` | [1, 192, 2, 68, 120] | 15.479 | 0.121884 | 0.114914 | 0.94x | 14.594 |
+| `up_blocks.1.resnets.0.conv2` | [1, 384, 2, 68, 120] | 4.158 | 0.032742 | 0.042721 | 1.30x | 5.426 |
+| `up_blocks.1.resnets.0.conv_shortcut` | [1, 192, 2, 68, 120] | 32.062 | 0.252453 | 0.069312 | 0.27x | 8.803 |
+| `up_blocks.1.resnets.1.conv1` | [1, 384, 2, 68, 120] | 5.334 | 0.042004 | 0.064573 | 1.54x | 8.201 |
+| `up_blocks.1.resnets.1.conv2` | [1, 384, 2, 68, 120] | 6.111 | 0.048119 | 0.060881 | 1.27x | 7.732 |
+| `up_blocks.1.resnets.2.conv1` | [1, 384, 2, 68, 120] | 4.581 | 0.036074 | 0.050575 | 1.40x | 6.423 |
+| `up_blocks.1.resnets.2.conv2` | [1, 384, 2, 68, 120] | 6.132 | 0.048280 | 0.062944 | 1.30x | 7.994 |
+| `up_blocks.1.upsamplers.0.time_conv` | [1, 384, 2, 68, 120] | 14.045 | 0.110594 | 0.090739 | 0.82x | 11.524 |
+| `up_blocks.1.upsamplers.0.resample.1` | [4, 384, 136, 240] | 11.524 | 0.090739 | 0.150476 | 1.66x | 19.110 |
+| `up_blocks.2.resnets.0.conv1` | [1, 192, 4, 136, 240] | 4.171 | 0.032841 | 0.047712 | 1.45x | 6.059 |
+| `up_blocks.2.resnets.0.conv2` | [1, 192, 4, 136, 240] | 6.661 | 0.052448 | 0.076883 | 1.47x | 9.764 |
+| `up_blocks.2.resnets.1.conv1` | [1, 192, 4, 136, 240] | 3.872 | 0.030490 | 0.032778 | 1.08x | 4.163 |
+| `up_blocks.2.resnets.1.conv2` | [1, 192, 4, 136, 240] | 6.743 | 0.053093 | 0.079617 | 1.50x | 10.111 |
+| `up_blocks.2.resnets.2.conv1` | [1, 192, 4, 136, 240] | 3.155 | 0.024841 | 0.039665 | 1.60x | 5.037 |
+| `up_blocks.2.resnets.2.conv2` | [1, 192, 4, 136, 240] | 5.722 | 0.045058 | 0.099491 | 2.21x | 12.635 |
+| `up_blocks.2.upsamplers.0.resample.1` | [4, 192, 272, 480] | 27.088 | 0.213290 | 0.239802 | 1.12x | 30.455 |
+| `up_blocks.3.resnets.0.conv1` | [1, 96, 4, 272, 480] | 3.538 | 0.027856 | 0.026978 | 0.97x | 3.426 |
+| `up_blocks.3.resnets.0.conv2` | [1, 96, 4, 272, 480] | 4.834 | 0.038064 | 0.063959 | 1.68x | 8.123 |
+| `up_blocks.3.resnets.1.conv1` | [1, 96, 4, 272, 480] | 3.756 | 0.029578 | 0.032248 | 1.09x | 4.095 |
+| `up_blocks.3.resnets.1.conv2` | [1, 96, 4, 272, 480] | 5.942 | 0.046785 | 0.060177 | 1.29x | 7.643 |
+| `up_blocks.3.resnets.2.conv1` | [1, 96, 4, 272, 480] | 4.214 | 0.033179 | 0.032101 | 0.97x | 4.077 |
+| `up_blocks.3.resnets.2.conv2` | [1, 96, 4, 272, 480] | 5.321 | 0.041895 | 0.080382 | 1.92x | 10.208 |
+| `conv_out` | [1, 96, 4, 272, 480] | 3.884 | 0.030584 | 0.011217 | 0.37x | 1.425 |
+
+### Post-add range per resnet (the tensor the residual add produces)
+
+`conv2`'s own range is **not** the resnet's output range: the add of `conv2_out + shortcut_out` raises it by 1.03x … 4.76x here, so a residual add quantised at `conv2`'s scale would clip.
+
+| resnet | post-add max&#124;x&#124; | SA | ÷ conv2's own range |
+|---|---|---|---|
+| `mid_block.resnets.0` | 9.785 | 0.077050 | 1.03x |
+| `mid_block.resnets.1` | 8.452 | 0.066555 | 2.32x |
+| `up_blocks.0.resnets.0` | 8.439 | 0.066452 | 2.51x |
+| `up_blocks.0.resnets.1` | 8.425 | 0.066341 | 1.82x |
+| `up_blocks.0.resnets.2` | 7.630 | 0.060082 | 1.98x |
+| `up_blocks.1.resnets.0` | 10.676 | 0.084059 | 1.97x |
+| `up_blocks.1.resnets.1` | 10.755 | 0.084683 | 1.39x |
+| `up_blocks.1.resnets.2` | 14.045 | 0.110594 | 1.76x |
+| `up_blocks.2.resnets.0` | 20.045 | 0.157834 | 2.05x |
+| `up_blocks.2.resnets.1` | 18.880 | 0.148658 | 1.87x |
+| `up_blocks.2.resnets.2` | 27.088 | 0.213290 | 2.14x |
+| `up_blocks.3.resnets.0` | 33.880 | 0.266771 | 4.17x |
+| `up_blocks.3.resnets.1` | 36.348 | 0.286205 | 4.76x |
+| `up_blocks.3.resnets.2` | 42.673 | 0.336008 | 4.18x |
 
 ## DiT block GEMMs — 6 steps x 30 blocks x 10 GEMMs
 
@@ -68,67 +89,3 @@ schedule [1000, 992, 982, 949, 905, 810] (locked), flow sigmas ['1.000', '0.992'
 
 Residual stream max&#124;x&#124; 2.32 … 359.04 across all 180 (step, block) entries.
 
-
-## What the numbers say
-
-**The placeholder `SA = 1/127` is wrong on most layers, in both directions.** 34 of the 36
-decoder layers need a *larger* scale than the nominal (median 4.9x, worst 32.1x on
-`up_blocks.1.resnets.0.conv_shortcut`, whose input is a resnet entry of max|x| 31.0), so the
-`npu_block convseq` runs in P3.8b/P3.8c were clipping on 34 of 36 layers — that is the
-quantified reason those walks "execute but do not decode". Two layers (`mid_block.resnets.0.conv2`,
-`up_blocks.2.resnets.0.conv1`) sit *below* the nominal and were wasting range instead.
-
-**On the DiT, 1261 of the 1800 (step, block, GEMM) instances exceed 1/127** and 539 sit below it,
-so no single activation scale is even directionally right across the block:
-
-| GEMM | measured SA / (1/127) | static-max / instance |
-|---|---|---|
-| `attn2.to_k`, `attn2.to_v` | 0.64x | 1.00x (identical in all 180) |
-| `attn2.to_out.0` | 0.50x | up to 3.21x |
-| `attn1.to_out.0` | 3.39x | up to 3.21x |
-| `ffn.net.0.proj` | 3.83x | up to 3.39x |
-| `attn1.to_q`/`to_k`/`to_v` | 4.29x | up to 4.92x |
-| `ffn.net.2` | 5.48x | up to 7.65x |
-| `attn2.to_q` | 18.79x | up to 3.92x |
-
-**Two independent consistency proofs fell out of the run, neither one asserted:**
-
-1. `attn2.to_k` and `attn2.to_v` read **0.005011 in all 180 instances** (spread 1.00x) — the
-   cross-attention context is the *same* RMS-normalised umT5 tensor in every block and step, so a
-   scale that is constant to the last digit is the correct answer, not a bug. Its constancy also
-   proves the text path is identical across the trajectory.
-2. `attn1.to_q`, `to_k`, `to_v` share one input and therefore one SA (0.033744 median, identical
-   min/max) — three separate hooks agreeing exactly.
-
-**A per-GEMM *static* scale is a measurable compromise**: taking each GEMM's max over all 180
-instances costs up to 7.65x of the available resolution (`ffn.net.2`, median instance 3.43x away
-from the static choice) because SA moves with the step and the block. The measured table is
-per (step, block, GEMM) for that reason; whether to ship 1800 scales or 10 static ones is a
-storage/accuracy trade the student can now price.
-
-**fp16 for the residual stream is safe as locked**: the largest hidden-state max|x| over all 180
-entries is **359.04** against the fp16 ceiling of 65504 — 182x of headroom — so the lock's
-"fp16 hidden state + per-GEMM calibrated input scale" needs no narrower term.
-
-## Scope, stated so it cannot be read as more than it is
-
-- **Base weights only.** 480 `base_layer.*` tensors were mapped to stock names and **0** were
-  missing; 480 `lora_A`/`lora_B` expert factors were dropped deliberately (they are the FP16
-  expert, not the INT8 base) and the DCM text-embedder LoRA (`condition_embedder_lora.*`, 12
-  tensors) is **not applied**, so the modulation is the stock one. Those are the only 12
-  unexpected tensors and they are reported, not silent.
-- **Latents.** The trajectory is the locked 6-step schedule at the locked timesteps, with a seeded
-  z_0 stand-in mixed at each step's flow sigma (`sigma = t/1000`; the scheduler's own convention
-  measured to 1e-3). That samples the activation regime per step; it is not a decoded video.
-- **Text.** Real umT5-XXL (bf16, 512 tokens); the failure path would have said so in
-  `text_source` rather than substituting silently.
-- **No device number here.** This writes scales; it changes no rate, and `T_N`/`T_G`/`T_V`/`k_b*`
-  are untouched.
-
-## Consumers this unblocks
-
-1. `artifacts/vae/bias_f32.bin` can become INT32 in `SA*SW` units (it is FP32 and flagged
-   `quantised: false` precisely because this file did not exist).
-2. `npu_block convseq` can carry a per-layer SA table instead of the nominal — the difference
-   between "the decode executes" and "the decode decodes".
-3. A Gate-1 number *with* the INT8 activation path, to sit beside the 40.22 dB weight-only result.

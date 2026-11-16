@@ -94,7 +94,26 @@ def calib_vae(seed: int, frames: int) -> dict:
     log(f"vae: reference loaded in {time.time() - t0:.1f} s")
 
     rec: dict[str, dict] = {}
+    rec_out: dict[str, dict] = {}
     handles = []
+
+    def take_out(name: str, out):
+        """The module's ACTUAL output tensor — the thing the next layer consumes."""
+        if out is None:
+            return
+        t = out[0] if isinstance(out, (tuple, list)) else out
+        if not hasattr(t, "detach"):
+            return
+        a = t.detach().float().numpy()
+        m = float(np.abs(a).max())
+        r = rec_out.setdefault(name, {"max_abs_out": 0.0, "calls_out": 0,
+                                     "out_shape": list(t.shape), "per_call_max_out": [],
+                                     "mean_abs_out_acc": []})
+        r["calls_out"] += 1
+        r["max_abs_out"] = max(r["max_abs_out"], m)
+        r["out_shape"] = list(t.shape)
+        r["per_call_max_out"].append(m)
+        r["mean_abs_out_acc"].append(float(np.abs(a).mean()))
 
     def make(name: str, kind: str):
         def hook(_mod, inp):
@@ -121,8 +140,43 @@ def calib_vae(seed: int, frames: int) -> dict:
 
     for L in art["layers"]:
         mod = vae.get_submodule(L["name"])
-        handles.append(mod.register_forward_pre_hook(make(L["name"], type(mod).__name__)))
-    log(f"vae: {len(handles)} pre-hooks on the artifact's layers")
+        nm = L["name"]
+        handles.append(mod.register_forward_pre_hook(make(nm, type(mod).__name__)))
+        handles.append(mod.register_forward_hook(
+            lambda _m, _i, out, nm=nm: take_out(nm, out)))
+    log(f"vae: {len(handles)} hooks ({len(art['layers'])} pre + forward) on the artifact's layers")
+
+    # The enclosing resnet's OUTPUT is `conv2_out + shortcut_out` — and the
+    # module-level conv2 range therefore understates what the next layer
+    # consumes (measured: conv2 0.03034 vs the following upsampler's input
+    # 0.06008 = 1.98x). That range is what the residual ADD has to fit in, so it
+    # is measured here instead of being inferred from two pre-add tensors.
+    resnet_names = sorted({L["name"].rsplit(".", 1)[0] for L in art["layers"]
+                           if L["name"].rsplit(".", 1)[1].startswith("conv")
+                           and not L["name"].endswith("conv_in")})
+    rec_res: dict[str, dict] = {}
+    n_res = 0
+    for rn in resnet_names:
+        try:
+            rmod = vae.get_submodule(rn)
+        except AttributeError:
+            continue
+        if "resnet" not in rn:
+            continue
+
+        def hook_res(_m, _i, out, rn=rn, rec=rec_res):
+            t = out[0] if isinstance(out, (tuple, list)) else out
+            if not hasattr(t, "detach"):
+                return
+            m = float(np.abs(t.detach().float().numpy()).max())
+            r = rec.setdefault(rn, {"max_abs_out": 0.0, "calls": 0, "per_call_max": []})
+            r["calls"] += 1
+            r["max_abs_out"] = max(r["max_abs_out"], m)
+            r["per_call_max"].append(m)
+
+        handles.append(rmod.register_forward_hook(hook_res))
+        n_res += 1
+    log(f"vae: {n_res} post-add hooks on the enclosing resnets")
 
     g = torch.Generator().manual_seed(seed)
     z = torch.randn(1, 16, frames, LATENT[3], LATENT[4], generator=g)
@@ -134,25 +188,52 @@ def calib_vae(seed: int, frames: int) -> dict:
     missing = [L["name"] for L in art["layers"] if L["name"] not in rec]
     if missing:
         raise SystemExit(f"vae: {len(missing)} layer(s) never fired a hook: {missing[:4]}")
+    missing_out = [L["name"] for L in art["layers"] if L["name"] not in rec_out]
+    if missing_out:
+        raise SystemExit(f"vae: {len(missing_out)} layer(s) never fired a FORWARD hook: "
+                         f"{missing_out[:4]} — an output range is what sa_out needs")
     for h in handles:
         h.remove()
 
     rows = []
     for L in art["layers"]:
         r = rec[L["name"]]
+        ro = rec_out[L["name"]]
         rows.append({"layer": L["name"], "kind": r["kind"], "in_shape": r["shape"],
+                     "out_shape": ro["out_shape"],
                      "calls": r["calls"], "max_abs": r["max_abs"],
                      "mean_abs": float(np.mean(r["mean_abs_acc"])),
                      "sa": r["max_abs"] / 127.0 if r["max_abs"] > 0 else None,
                      "sa_per_frame": [m / 127.0 for m in r["per_frame_max"]],
                      "per_frame_max": r["per_frame_max"],
                      "per_call_max": r["per_call_max"],
-                     "max_abs_out": float(out.abs().max()),
+                     # the OUTPUT range: this is what the requant has to land in,
+                     # and it is measured on the tensor the module actually emitted
+                     # (was `out.abs().max()` of the whole DECODE before P3.11, a
+                     # flat 1.0 for all 36 rows — never an output calibration).
+                     "calls_out": ro["calls_out"],
+                     "max_abs_out": ro["max_abs_out"],
+                     "mean_abs_out": float(np.mean(ro["mean_abs_out_acc"])),
+                     "sa_out": ro["max_abs_out"] / 127.0 if ro["max_abs_out"] > 0 else None,
+                     "per_call_max_out": ro["per_call_max_out"],
+                     "sa_out_vs_sa_in": (ro["max_abs_out"] / r["max_abs"]
+                                         if r["max_abs"] > 0 else None),
+                     "decode_out_max_abs": float(out.abs().max()),
                      "weight_relfro": float(L["quant"]["rel_fro"]),
                      "weight_cosine": float(L["quant"]["cosine"])})
     return {"target": "vae", "seed": seed, "latent": list(z.shape),
-            "layers": rows, "built": time.strftime("%Y%m%d_%H%M%S"),
+            "layers": rows,
+            "resnets": [{"resnet": k, "max_abs_out": v["max_abs_out"], "calls": v["calls"],
+                         "sa_out": v["max_abs_out"] / 127.0,
+                         "per_call_max": v["per_call_max"]}
+                        for k, v in sorted(rec_res.items())],
+            "built": time.strftime("%Y%m%d_%H%M%S"),
             "note": "SA = max|x|/127 over the tensor the layer's conv taps consumed, "
+                    "SA_out = max|x_out|/127 over the tensor the module EMITTED "
+                    "(forward hook, max kept across the decode's frame chunks), "
+                    "`resnets[].max_abs_out` = the tensor AFTER the residual add "
+                    "(conv2_out + shortcut_out) — the range the add must fit in, and "
+                    "1.98x conv2's own range in at least one measured resnet. "
                     "FP32 forward, real checkpoint weights. The artifact's FP32 bias can "
                     "now become INT32 in SA*SW units; nothing here quantises the decode."}
 
@@ -366,11 +447,30 @@ def write_md(vae: dict | None, dit: dict | None, path: Path) -> None:
               "activation its own taps consumed.", "",
               f"`SA` range **{min(sas):.6f} … {max(sas):.6f}** (spread {max(sas) / min(sas):.2f}x) "
               f"against the placeholder `1/127 = {1/127:.6f}`.", "",
-              "| layer | in shape | max&#124;x&#124; | SA | vs 1/127 |", "|---|---|---|---|---|"]
+              "| layer | in shape | max&#124;x&#124; | SA_in | SA_out | out/in | max&#124;x_out&#124; |",
+              "|---|---|---|---|---|---|---|"]
         for r in vae["layers"]:
             b.append(f"| `{r['layer'].replace('decoder.', '')}` | {r['in_shape']} | "
-                     f"{r['max_abs']:.3f} | {r['sa']:.6f} | {r['sa'] * 127:.2f}x |")
+                     f"{r['max_abs']:.3f} | {r['sa']:.6f} | {r['sa_out']:.6f} | "
+                     f"{r['max_abs_out'] / r['max_abs']:.2f}x | {r['max_abs_out']:.3f} |")
         b.append("")
+        if vae.get("resnets"):
+            ro = vae["resnets"]
+            b += ["### Post-add range per resnet (the tensor the residual add produces)",
+                  "",
+                  "`conv2`'s own range is **not** the resnet's output range: the add of "
+                  "`conv2_out + shortcut_out` raises it by 1.03x … 4.76x here, so a residual add "
+                  "quantised at `conv2`'s scale would clip.",
+                  "",
+                  "| resnet | post-add max&#124;x&#124; | SA | ÷ conv2's own range |",
+                  "|---|---|---|---|"]
+            c2 = {r["layer"]: r for r in vae["layers"]}
+            for r in ro:
+                k = f"{r['resnet']}.conv2"
+                amp = (r["max_abs_out"] / c2[k]["max_abs_out"]) if k in c2 else float("nan")
+                b.append(f"| `{r['resnet'].replace('decoder.', '')}` | "
+                         f"{r['max_abs_out']:.3f} | {r['sa_out']:.6f} | {amp:.2f}x |")
+            b.append("")
     if dit:
         b += ["## DiT block GEMMs — 6 steps x 30 blocks x 10 GEMMs", "",
               f"text conditioning: {dit['text_source']}", "",
