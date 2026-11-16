@@ -185,16 +185,84 @@ border is the tap offset), and the harness now **refuses** a class whose warm-up
 faults, and reports `UNVERIFIED` instead of `MATCH` when both buffers are zero — "0
 mismatches between two zero buffers" is not a pass.
 
-## 7. Still TBD
+## 7. The mid-block attention — measured on both engines (new, 2026-11-15 21:2x)
+
+The 6120-token × 384-ch mid-block attention was the last unmeasured term of `T_V`, so both branches
+carried a lower bound. It is now measured, and **the ordering flips again**: the GPU is 7× faster at
+the attention than the TPU, the opposite of the conv stack where the TPU wins by 1.16×.
+
+What the op actually is, off `configs/vae_decode_ops.json` (32,374,702,080 MACs): QK^T and AV are
+`[6120, 6120, K=384]` (14.39 GMAC each), the q/k/v/o projections are `[6120, 384, K=384]` (0.91 GMAC
+each). Unit of measurement = one token tile at **M = 384**, the same construction as the `T_N`
+per-GEMM table, so the two engines are like-for-like.
+
+Artifacts: `docs/device/attn_tv_20261115_211944.{json,md}` (NPU), `docs/device/attn_mali_20261115_212126.json`
+(Mali, the last of four attempts — see the padding trap below). Harnesses: `npu_block attn` (new mode,
+`tools/npu/npu_host.py --modes attn --out attn_tv`) and `gemm_bench gemm <M> <N> <K>` (new mode,
+`tools/gemm/attn_mali.py`).
+
+| engine | GEMM | ms / token tile (M=384) | per pass over 6120 tokens | GOPS |
+|---|---|---|---|---|
+| **Edge TPU** | score `[384, 6120, 384]` | 15.656 | **0.2505 s** (16 tiles) | 115.3 |
+| **Edge TPU** | proj `[384, 384, 384]` | 1.568 | **0.0251 s** (16 tiles) | 72.2 |
+| **Mali-G78** | score `[384, 6144, 384]` | 3.262 | 0.0522 s (16 tiles) — **not the rate, see below** | 555.5 |
+| **Mali-G78** | proj `[384, 384, 384]` | 0.538 | 0.0086 s (16 tiles) | 210.3 |
+| **Mali-G78** | score as **one dispatch** `[6144, 6144, 384]` | — | **0.0361 s** | 803.7 |
+| **Mali-G78** | proj as **one dispatch** `[6144, 384, 384]` | — | **0.0033 s** | 543.0 |
+
+Mali does not have to tile the token axis, and it should not: one dispatch at M=6144 is
+34.4–36.1 ms where 16 M=384 dispatches cost 52.2 ms — so the token-tiled number is a *dispatch
+overhead* artefact, not a rate. The rate that goes into `T_V` is the one-dispatch column.
+
+> **attention, Edge TPU** = 2 × 0.2505 (QK^T, AV) + 4 × 0.0251 (q,k,v,o) = **0.601 s**
+> **attention, Mali-G78** = 2 × 0.0361 + 4 × 0.0033 = **0.0855 s** ⇒ **Mali 7.0× faster**
+
+Both are far off the engines' peak parity with their own best shapes (TPU 54 GOPS effective here vs
+969 GOPS on the convs; Mali 381 vs 842 GOPS) because K=384 is a short reduction: the projections in
+particular are launch-bound on both. That is measured, not modelled — no rate in this section is
+derived from another shape.
+
+**So `T_V` is no longer a lower bound:**
+
+| decode configuration | conv part | attention | `T_V` | `k_b*` |
+|---|---|---|---|---|
+| all-TPU | 10.554 s | 0.601 s | **11.155 s** | 161 |
+| **hybrid: convs on TPU, attention on Mali** | 10.554 s | 0.0855 s | **10.640 s** | **160** |
+| all-Mali | 12.256 s | 0.0855 s | **12.342 s** | 162 |
+
+From `phase2_profile/solve_cut.py --Tg 0.1474 --Tn 0.6484`: `k_b*` = 160.03 continuous at
+`T_V` = 10.640 (period 23.61 s, 5.394× vs NPU-only), 160.68 at 11.155, 162.17 at 12.342. **The locked
+`k_b* = 160` survives** if the mid-block attention runs on Mali; sending it to the TPU costs one
+block of cut (+0.6 % period). Since the attention is 0.63 % of the decode's MACs but 5.7 % of its
+time on the TPU, this is a cheap hybrid, not a modelling trick.
+
+Two things this run paid for:
+
+- **The Mali tiled kernel needs N (and M) on a 64-multiple.** At N=6120 the tail output tile writes
+  past `C` and the completion read returns `CL_EXEC_STATUS_ERROR (-14)` while the harness happily
+  prints **10,502 GOPS** — a physically impossible number that only the read status exposes. Same
+  family as the `round_up` global-size trap. The measured shapes are therefore padded 6120 → 6144
+  (+0.39 % MACs), and the padding is recorded in `attn_mali_*.json` as `pad_note`.
+- **The NPU accepts N=6120 at K=384 with no trouble** (compile 374 ms, one graph per shape,
+  per-tensor scales as always) — the attention is not a `ffn.down`-class shape, so the NPU *can* host
+  it; it is simply 7× slower than the GPU at doing so.
+
+Thermal: the NPU run started at TPU 25.0 °C / battery 21.9 °C (gate 24.9 — **0.1 °C above a
+battery-driven gate**, i.e. the same idle floor the table-grade `T_N` capture sat on at 29.0 vs 29.1)
+and did not move the zones (whole run ≈ 1 s of uptime). The Mali run started at the same 25.0 °C and
+is recorded before/after in its artifact. Neither run shows throttling.
+
+## 8. Still TBD
 
 | quantity | state |
 |---|---|
 | `T_V` TPU, conv MACs | **10.554 s/chunk**, 969.7 GOPS, 100 % of conv MACs, gate-compliant start |
 | `T_V` Mali, conv MACs | **12.256 s/chunk**, 417.5 GOPS, 100 % of conv MACs, 7/13 classes exact vs `conv8_ref` |
-| `T_V` mid-block attention (32.4 GMAC) | TBD — no measured rate on either engine (not a conv); `T_V` stays a **lower bound** on both branches |
+| `T_V` mid-block attention (32.4 GMAC) | **measured 2026-11-15 21:2x**: Edge TPU **0.601 s/chunk** (115 GOPS on the score shape), Mali **0.0855 s/chunk** as one dispatch per GEMM (804 GOPS) ⇒ **Mali 7.0× faster**. 6120 tokens padded to 6144 for the kernel's 64-wide tile |
+| `T_V` total | **no longer a lower bound**: 11.155 s all-TPU · **10.640 s hybrid (convs TPU + attention Mali)** · 12.342 s all-Mali |
 | Mali conv rate vs its own GEMM | 378–486 GOPS vs 877 GOPS — halo-staged activation tile is the next measurement (no number claimed) |
 | co-run `T_G` | **measured 2026-11-15 19:48** → `RESULTS_corun_tg.md`: no contention (GPU base block 0.1474 s co-run vs 0.1618 solo; NPU per-GEMM Δ ≤ 4 %) |
-| `k_b*` | **solved = 160** with `T_V` = 10.554 s (TPU decode): period 23.58 s, 5.40× vs NPU-only. 162 with the Mali decode. Still conditional on the mid-block attention term |
+| `k_b*` | **160** — unchanged with the hybrid decode (`T_V` = 10.640, 5.394× vs NPU-only); 161 if the attention goes to the TPU, 162 all-Mali. Attention-on-Mali is the only configuration that keeps the locked cut |
 
 ### Thermal-gate note (why `--gate-slack 1.0`)
 

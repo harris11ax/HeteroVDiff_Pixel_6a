@@ -936,6 +936,26 @@ static void do_conv(CL* c, const std::vector<int>& which, int iters, int do_veri
 }
 
 
+// ------------------------------------------- arbitrary GEMM (T_V attention unit)
+// One dispatch of an arbitrary [M,N,K] INT8 GEMM at the block-table variant.
+// The VAE mid-block attention is 6120 tokens x 384 ch: QK^T and AV are
+// [M,6120,384] and the four projections are [M,384,384]. Same unit of
+// measurement as the NPU `attn` mode, so the two branches stay comparable and no
+// number here is modelled. Usage: gemm <cl> <variants> <iters> <M> <N> <K>
+static void do_gemm_shape(CL* c, const std::vector<int>& which, int M, int N, int K, int iters) {
+    const int Mpad = (M + 127) / 128 * 128;
+    Buf b{};
+    if (!alloc_shape(c, &b, Mpad, N, K, 128)) { p("ATTN|setup_fail"); return; }
+    for (int vi : which) {
+        Variant* v = &g_var[vi];
+        if (!v->prog || v->kind == 2) continue;      // tiled / direct only
+        double ms = launch(c, v, &b, M, N, K, iters, 0, 0, b.Craw, b.U, b.Bl, 128);
+        p("ATTN_GEMM|%s|M=%d|N=%d|K=%d|Mpad=%d|iters=%d|ms=%.4f|gops=%.2f|per_pass_16t=%.4f",
+          v->name, M, N, K, Mpad, iters, ms, gops(M, N, K, ms), ms * 16.0 / 1000.0);
+    }
+    free_shape(c, &b);
+}
+
 int main(int argc, char** argv) {
     std::string mode = argc > 1 ? argv[1] : "all";
     std::string cl_path = argc > 2 ? argv[2] : "/data/local/tmp/gemm8.cl";
@@ -971,6 +991,10 @@ int main(int argc, char** argv) {
     if (mode == "diag") do_diag(&c, src);
     if (mode == "conv") do_conv(&c, which, iters, argc > 6 ? atoi(argv[6]) : 1);
     if (mode == "peak") do_peak(&c, src, argc > 7 ? atoi(argv[7]) : 2000);
+    if (mode == "gemm")
+        do_gemm_shape(&c, which, argc > 5 ? atoi(argv[5]) : 6120,
+                      argc > 6 ? atoi(argv[6]) : 6120,
+                      argc > 7 ? atoi(argv[7]) : 384, iters);
     if (mode == "verify" || mode == "all") do_verify(&c, src);
     if (mode == "bench" || mode == "all") do_bench(&c, which, iters);
     if (mode == "f16" || mode == "all") do_f16(&c, which, iters);

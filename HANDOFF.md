@@ -22,12 +22,12 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | Gate 2 (zero-copy) | **pass** on both routes; file-mmap route B preferred |
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
-| **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) still unmeasured ⇒ `T_V` is a lower bound on both |
+| **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound |
 | Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg (blocked: no torch/diffusers on this host)** |
 | Gates 3–5 | pending |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
-| **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.58 s, 5.40× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode |
-| Blocker | mid-block VAE attention has no measured rate on either engine (`T_V` is a lower bound); `ffn.down` is not in the contended number. `T_V` 10.554 s (TPU) vs 12.256 s (Mali) — TPU-favourable |
+| **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.58 s, 5.40× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
+| Blocker | every rate the cut needs is now measured on both engines (block, `ffn.down`, convs, mid-block attention, co-run) — the mid-block VAE attention closed 2026-11-15 21:2x. What is still blocked: the Gate-1 end-to-end PSNR/SSIM leg and `calibrate.py` (**no torch/diffusers on this host**), and Gates 3–5 are unbuilt |
 
 ## The two results that changed the project
 
@@ -126,11 +126,21 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    is **null** (no alpha tensor exists in the checkpoint — copy it from the reference repo, do not
    guess), and the spec's 60×40-latent-pixel tile **degenerates to one tile** at Preset A (latent
    plane is 34×60).
-8. **NEXT ACTION (device; item 7 is done except the torch-blocked bits).** Mid-block VAE attention
-   (32.4 GMAC) is the last unmeasured rate; it is the only thing keeping `T_V`
-   a lower bound. Needs a GEMM rate at 6120 tokens × 384 ch on both engines — 16 token tiles at
-   M ≤ 384 on the NPU (one graph per tile, never a batched graph), one dispatch on Mali.
-9. Phase 3 executors, Phase 4 tables, report.
+8. ~~**Mid-block VAE attention**~~ — **done 2026-11-15 21:2x, both engines measured.** New modes:
+   `npu_block attn` (`tools/npu/npu_host.py --modes attn --out attn_tv`) and `gemm_bench gemm <M> <N> <K>`
+   (`tools/gemm/attn_mali.py`). 6120 tokens × 384 ch = 2× `[6120,6120,384]` (QK^T, AV) + 4× `[6120,384,384]`.
+   TPU **0.601 s/chunk** (score 15.656 ms per M=384 tile, 115 GOPS; proj 1.568 ms, 72 GOPS);
+   Mali **0.0855 s/chunk** (one dispatch per GEMM: 36.071 ms + 4×3.337 ms, 804 GOPS) ⇒ **Mali 7.0× faster**.
+   `T_V` is no longer a lower bound: **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali**, and
+   `k_b*` = 161 / **160** / 162 — the locked 160 survives with the attention on Mali. Trap paid for:
+   the Mali tiled kernel writes past `C` when N is not a multiple of 64 (`-14` on the completion read,
+   while printing 10,502 GOPS); N padded 6120 → 6144. → `RESULTS_vae_tv.md` §7.
+9. **NEXT ACTION (Phase 3, Gates 3–5).** Every rate the cut needs is now measured; build the
+   two-process pipeline that streams ≥10 chunks on the phone: GPU process on blocks `[0,160)`, NPU
+   process on `[160,180)` + decode, one handoff per chunk, no manual intervention. Start with the
+   chunk handoff (one file-mapped artifact, no second INT8 copy) and prove 2 chunks before 10.
+   Host-only work that can run in parallel: fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`.
+10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
 
@@ -155,6 +165,9 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
 - **32 int accumulators maximum** per thread; 64 spills (112–144 B/thread) and costs 4.5×.
 - Predicate the epilogue — a `break` in an unrolled loop spills the accumulators.
 - `arm_dot_acc` is a real SDOT; measured ceiling **1.77 TOPS**.
+- **The tiled GEMM needs N and M on a 64-multiple.** At N=6120 the tail output tile writes past `C`;
+  the only symptom is `CL_EXEC_STATUS_ERROR (-14)` on the completion read, while the timing prints a
+  physically impossible 10,502 GOPS (measured 2026-11-15, `attn_mali_*`). Pad the shape and record the pad.
 
 NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
 
