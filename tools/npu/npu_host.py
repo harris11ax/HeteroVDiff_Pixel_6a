@@ -97,7 +97,7 @@ def parse(stdout: str) -> dict:
                 d = {"op": parts[1]}
                 for kv in parts[2:]:
                     k, _, v = kv.partition("=")
-                    d[k] = float(v) if k in ("compile_ms", "ms_per_tile", "per_block_s", "gops") else int(v)
+                    d[k] = float(v) if k in ("compile_ms", "ms_per_tile", "per_block_s", "per_pass_s", "gops") else int(v)
                 rec["op"].append(d)
             elif tag == "SUMMARY":
                 d = {}
@@ -183,8 +183,9 @@ def md_report(rec: dict) -> str:
         if p["op"]:
             L += ["| op | N | K | compile ms | ms/tile | s/block | GOPS |", "|---|---|---|---|---|---|---|"]
             for o in p["op"]:
+                per = o.get("per_pass_s", o.get("per_block_s"))
                 L.append(f"| `{o['op']}` | {o.get('N')} | {o.get('K')} | {o.get('compile_ms')} | "
-                         f"{o.get('ms_per_tile')} | {o.get('per_block_s')} | {o.get('gops')} |")
+                         f"{o.get('ms_per_tile')} | {per} | {o.get('gops')} |")
             L.append("")
         if p["fatal"]:
             L += ["```"] + p["fatal"] + ["```", ""]
@@ -213,6 +214,7 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=420, help="per-mode device timeout")
     ap.add_argument("--only", type=int, default=-1,
                     help="single-mode: run only this GEMM index (0-9), -1 = all 10")
+    ap.add_argument("--out", default="npu_tn", help="artifact filename prefix (docs/device/<out>_<ts>)")
     ap.add_argument("--serial", default=None)
     args = ap.parse_args()
 
@@ -289,9 +291,9 @@ def main() -> int:
            "iters": args.iters, "M": args.M, "pc": args.pc, "binary_sha256": sha256(BIN),
            "temps": {"before": temps_before, "after": temps_after}, "runs": runs}
     DEVICE_DIR.mkdir(parents=True, exist_ok=True)
-    js = DEVICE_DIR / f"npu_tn_{ts}.json"
+    js = DEVICE_DIR / f"{args.out}_{ts}.json"
     js.write_text(json.dumps(rec, indent=2), encoding="utf-8")
-    md = DEVICE_DIR / f"npu_tn_{ts}.md"
+    md = DEVICE_DIR / f"{args.out}_{ts}.md"
     md.write_text(md_report(rec), encoding="utf-8")
     print(f"\nwrote {js}\nwrote {md}")
 

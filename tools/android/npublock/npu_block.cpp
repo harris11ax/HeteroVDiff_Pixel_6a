@@ -63,6 +63,21 @@ static const char* W_DOWN_PATH = "/data/local/tmp/hv_down_chunks.bin";
 static const int DOWN_N = 1536;
 static const int DOWN_K = 8960;
 
+// VAE mid-block attention — the last unmeasured term of `T_V`. The attention is
+// 6120 tokens x 384 ch: QK^T and AV are [M=384 tile, N=6120, K=384] and the four
+// projections (q,k,v,o) are [M=384, N=384, K=384]. Both matrices live in ONE
+// file-mapped blob at fixed offsets, same route-B discipline as the block blob.
+// LCG fill (latency is shape-determined; the real INT8 artifact is Phase 1).
+static const char* W_ATTN_PATH = "/data/local/tmp/hv_attn_int8.bin";
+static const int ATTN_SCORE_N = 6120;
+static const int ATTN_SCORE_K = 384;
+static const int ATTN_PROJ_N  = 384;
+static const int ATTN_PROJ_K  = 384;
+static const int64_t ATTN_SCORE_OFF = 0;
+static const int64_t ATTN_PROJ_OFF  = (int64_t)ATTN_SCORE_N * (int64_t)ATTN_SCORE_K;
+static const int64_t ATTN_RAW_BYTES = ATTN_PROJ_OFF + (int64_t)ATTN_PROJ_N * (int64_t)ATTN_PROJ_K;
+static const int64_t ATTN_BYTES = (ATTN_RAW_BYTES + 4095) / 4096 * 4096;   // page-aligned
+
 // The Preset-A DiT block's 10 base GEMMs, in execution order. Layout is row-major
 // [N_out, K] INT8 — the layout both arm_dot (Mali) and NNAPI FC want.
 struct Gemm { int N; int K; int64_t off; const char* name; };
@@ -139,6 +154,31 @@ static int64_t ensure_weights(const char** why) {
     munmap(p, (size_t)W_BYTES);
     close(fd);
     P("WFILE|path=%s|bytes=%lld|fill=lcg", W_PATH, (long long)W_BYTES);
+    return 0;
+}
+
+// One blob for the mid-block attention: score matrix [6120,384] at offset 0,
+// projection matrix [384,384] after it, tail zero-padded to a page boundary.
+static int64_t ensure_attn_blob(const char** why) {
+    struct stat st;
+    if (stat(W_ATTN_PATH, &st) == 0 && st.st_size == ATTN_BYTES) return 0;
+    int fd = open(W_ATTN_PATH, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { *why = "attn_open"; return -1; }
+    if (ftruncate(fd, (off_t)ATTN_BYTES) != 0) { *why = "attn_trunc"; close(fd); return -1; }
+    void* p = mmap(nullptr, (size_t)ATTN_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) { *why = "attn_mmap"; close(fd); return -1; }
+    int8_t* q = (int8_t*)p;
+    uint32_t x = 0xC0FFEE11u;
+    for (int64_t i = 0; i < ATTN_RAW_BYTES; ++i) {
+        x = x * 1664525u + 1013904223u;
+        q[i] = (int8_t)((x >> 24) & 0xFF);
+    }
+    for (int64_t i = ATTN_RAW_BYTES; i < ATTN_BYTES; ++i) q[i] = 0;
+    msync(p, (size_t)ATTN_BYTES, MS_SYNC);
+    munmap(p, (size_t)ATTN_BYTES);
+    close(fd);
+    P("WFILE|path=%s|bytes=%lld|fill=lcg|score=%dx%d|proj=%dx%d",
+      W_ATTN_PATH, (long long)ATTN_BYTES, ATTN_SCORE_N, ATTN_SCORE_K, ATTN_PROJ_N, ATTN_PROJ_K);
     return 0;
 }
 
@@ -659,7 +699,8 @@ int main(int argc, char** argv) {
     int tiles = argc > 2 ? atoi(argv[2]) : 4;
     int iters = argc > 3 ? atoi(argv[3]) : 3;
     int M     = argc > 4 ? atoi(argv[4]) : 384;
-    if (argc > 5 && strcmp(mode, "conv") != 0) G_PC = atoi(argv[5]) ? 1 : 0;
+    if (argc > 5 && strcmp(mode, "conv") != 0 && strcmp(mode, "attn") != 0)
+        G_PC = atoi(argv[5]) ? 1 : 0;
     int only = (argc > 6 && strcmp(mode, "conv") != 0) ? atoi(argv[6]) : -1;   // single-mode op filter (-1 = all)
     RunCfg cfg{M, tiles, iters};
 
@@ -682,6 +723,10 @@ int main(int argc, char** argv) {
             P("FATAL|bad_chunk_count|%s|want=down2|down4|downsep", mode); P("DONE"); return 2; }
         if (ensure_down_blob(nchunks, &wpath, &why)) { P("FATAL|down_weights|%s", why); P("DONE"); return 2; }
         wbytes = (int64_t)DOWN_N * (int64_t)DOWN_K;
+    } else if (strcmp(mode, "attn") == 0) {
+        if (ensure_attn_blob(&why)) { P("FATAL|attn_weights|%s", why); P("DONE"); return 2; }
+        wpath = W_ATTN_PATH;
+        wbytes = ATTN_BYTES;
     } else if (ensure_weights(&why)) { P("FATAL|weights|%s", why); P("DONE"); return 2; }
 
     ANeuralNetworksMemory* wmem = nullptr;
@@ -910,6 +955,55 @@ int main(int argc, char** argv) {
           "per_block_s=%.4f|gops=%.1f|samples=%zu",
           mode, M, tiles, iters, compile_ms, per_tile, block_s,
           2.0 * gmacs / block_s / 1e9, tm.size());
+        P("DONE");
+        return 0;
+    }
+
+    // mode=attn: the VAE mid-block attention GEMM — the last unmeasured term of
+    // `T_V`. 6120 tokens x 384 ch decomposes into 16 token tiles at M=384:
+    //   * score pass  [M, 6120, 384] — this is QK^T and, by symmetry, AV.
+    //   * proj  pass  [M, 384, 384]  — q, k, v, o (four of them).
+    // Per-tensor scales only: FULLY_CONNECTED rejects per-channel before compile
+    // (measured, RESULTS_npu_tn.md finding #2), so the NPU rate exists only for
+    // that scheme. `tiles` = 16 reproduces one full pass over all 6120 tokens.
+    if (strcmp(mode, "attn") == 0) {
+        G_PC = 0;
+        P("NOTE|mode=attn|pc=0|per_tensor|M=%d|tiles=%d|iters=%d|score=%dx%d|proj=%dx%d",
+          M, tiles, iters, ATTN_SCORE_N, ATTN_SCORE_K, ATTN_PROJ_N, ATTN_PROJ_K);
+        Gemm ga[2] = {
+            {ATTN_SCORE_N, ATTN_SCORE_K, ATTN_SCORE_OFF, "attn.score"},
+            {ATTN_PROJ_N,  ATTN_PROJ_K,  ATTN_PROJ_OFF,  "attn.proj"},
+        };
+        for (int gi = 0; gi < 2; ++gi) {
+            Holder h; uint32_t in_id = 0, out_id = 0; why = "";
+            if (build_model(wmem, M, &ga[gi], 1, h, &in_id, &out_id, &why)) {
+                P("FATAL|build_attn|%s|why=%s", ga[gi].name, why); P("DONE"); return 5; }
+            rc = ANeuralNetworksModel_finish(h.m);
+            if (rc) { P("FATAL|model_finish_attn|%s|rc=%d(%s)", ga[gi].name, rc, rcs(rc));
+                      ANeuralNetworksModel_free(h.m); P("DONE"); return 6; }
+            ANeuralNetworksCompilation* comp = nullptr;
+            int64_t c0 = now_ns();
+            rc = ANeuralNetworksCompilation_createForDevices(h.m, &tpu, 1, &comp);
+            if (rc) { P("FATAL|comp_create_attn|%s|rc=%d(%s)", ga[gi].name, rc, rcs(rc));
+                      ANeuralNetworksModel_free(h.m); P("DONE"); return 7; }
+            ANeuralNetworksCompilation_setPreference(comp, ANEURALNETWORKS_PREFER_SUSTAINED_SPEED);
+            rc = ANeuralNetworksCompilation_finish(comp);
+            double cms = (now_ns() - c0) / 1e6;
+            if (rc) { P("FATAL|comp_finish_attn|%s|ms=%.1f|rc=%d(%s)", ga[gi].name, cms, rc, rcs(rc));
+                      P("DONE"); return 7; }
+            std::vector<double> atm, ahw;
+            if (time_tiles(comp, cfg, out_id, ga[gi].N, ga[gi].K, &atm, &ahw,
+                           ga[gi].name, &why)) { P("DONE"); return 8; }
+            double s = 0; for (double v : atm) s += v;
+            double mean = atm.empty() ? -1.0 : s / (double)atm.size();
+            double pass_s = mean * tiles / 1000.0;
+            double gmacs = (double)tiles * (double)M * (double)ga[gi].N * (double)ga[gi].K;
+            P("OP|%s|N=%d|K=%d|compile_ms=%.1f|ms_per_tile=%.3f|per_pass_s=%.4f|gops=%.1f",
+              ga[gi].name, ga[gi].N, ga[gi].K, cms, mean, pass_s,
+              pass_s > 0 ? 2.0 * gmacs / pass_s / 1e9 : -1.0);
+            ANeuralNetworksCompilation_free(comp);
+            ANeuralNetworksModel_free(h.m);
+        }
         P("DONE");
         return 0;
     }
