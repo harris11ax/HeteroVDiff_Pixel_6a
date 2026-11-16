@@ -34,6 +34,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **Gate 3 (parity)** | **measured, FAILS as configured — but LOCALIZED and a passing recipe exists** → `docs/device/RESULTS_gate3_parity.md` + `docs/device/RESULTS_gate3_bisect.md`, tools `tools/pipe/gate3_parity.py`, `tools/pipe/gate3_bisect.py`, `proc_b --dump-parity/--probe-dir/--act`. The break is the **M (row) direction**: `N = 384` graphs are **100.00 % bit-exact (Δ = 0, 0 elements off by ≥2)** at `M = 1/8/128/160/192/200`, `N = 768` at `M = 128`, `N = 1536` at `M = 1`, on both `attn1.to_q` and `ffn.up`; the same 384-column graph at `M = 384` **will not compile** (`OP_FAILED`, ~58 ms). Wide graphs at `M = 256…384` return 25.8–50.7 %. So the fix Gate 3 proposed ("one graph per 384-column block") is the exact graph this compiler refuses, and the exact recipe is `N ∈ {128,384,768}` × `M ≤ 200` = **112 executes/block** instead of 9 at 384 tokens (**448 executes / 56 compilations at the stage's 1536 tokens; cost now measured in P3.7c**) |
 | Gates 4–5 | Gate 4 PASS (memory + one copy) |
 | **Exact recipe `T_N` (P3.7c)** | **measured** → `docs/device/RESULTS_tn_recipe.md`: the only bit-exact geometry (P3.7b) costs **0.7164 s/block** for the nine GEMMs = **1.90× the 377.8 ms 9-graph stage**, **140 GOPS** vs 265, at **56 compilations (8.64 s) / 448 executes** per block — and returns **448/448 tiles bit-exact (Δ = 0 LSB)**, `ffn.up`'s tail-128 block included, checked byte-wise against the artifact. 4 runs, 0.3 % spread. `solve_cut.py` on the measured pair: `k_b* = 166`, period **24.47 s (+3.6 %)** — **reported, not applied** (solo vs the locked co-run number) |
+| **Exact recipe, co-run (P3.7d)** | **measured** → `docs/device/RESULTS_corun_recipe.md`, capture `corun_recipe_20261116_020926` (pilot `…_020535`), tool `tools/corun/co_recipe.py`. Under GPU load the recipe costs **700.5 ms/block** vs **707.0 ms** before the GPU joined in the same run (−0.9 %) ⇒ **contention is not measurable on either engine**; GPU block **146.05 ms** while the recipe executes vs **160.27 ms** solo (same 8–9 % "faster under load" direction as `RESULTS_corun_tg.md`, cause still DVFS-unestablished); overlap **100.0 %** from CLOCK_MONOTONIC stamps. Cost of the **pass-major** rewrite (needed so a pass is classifiable): all **56 graphs held at once**, compile **9.57 s/block**, 448 executes/pass, solo sanity **710.3 ms**. `T_N` = 0.7005 + 0.2580 `ffn.down` (**still solo**) = **0.9585 s** ⇒ `k_b* = 166`, period **24.25 s (+2.7 %)** — **reported, not applied** |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
 | **Sustained `T_N`** | **measured** → `docs/device/RESULTS_sustain_npu.md`; 60 rounds × 9 GEMMs = **24.6 s of continuous TPU work, drift +0.35 %** (first-20 % 408.9 / last-20 % 410.3 ms per round, slope +0.03 ms/round) while the TPU zone rose 25.0 → 31.0 °C ⇒ **no derating over a full NPU stage**, so `T_N` carries no throttle term. Tool: `python tools/npu/sustain_npu.py` |
 | **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.61 s, 5.394× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
@@ -282,13 +283,20 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    including `ffn.up`'s tail-128 block. Compile **8.64 s per block** (154 ms/graph), separable
    from exec and amortisable if the graphs survive across chunks. `solve_cut.py` with `T_N` =
    0.7164 + 0.2580 downsep → **k_b\* = 166, period 24.47 s (+3.6 %)**, reported not applied.
-   **NEXT ACTION (P3.7d): the co-run treatment of the exact recipe** — 0.7164 is solo and the
-   locked 0.6484 is co-run, so no cut argument may use it until both engines run together
-   (`tools/corun/co_run.py`). Then re-run `solve_cut.py`.
-   Also unproven: the 100 % holds on blocks other than `block_00`, and on `ffn.down` (K=8960).
-   Still unrun after that: `--decode 1` remains a **no-op stub** (the measured
-   10.554 s TPU decode is cited, not executed) and Gate 1's PSNR/SSIM leg +
-   `calibrate.py` are the host-only work for a tick when the phone is absent/hot.
+   **P3.7d DONE 2026-11-16 02:09 — the exact recipe is co-run-priced and contention is a non-event**
+   → `docs/device/RESULTS_corun_recipe.md`, tool `tools/corun/co_recipe.py` +
+   `co_recipe_device.sh`, capture `corun_recipe_20261116_020926` (pilots `…_015944` / `…_020535`).
+   `proc_b --recipe 1` and `gemm_bench block` in two processes, both stamping CLOCK_MONOTONIC:
+   recipe **700.5 ms/block** contended vs **707.0 ms** in the passes before the GPU joined
+   (−0.9 %), GPU **146.05 ms** contended vs **160.27 ms** solo, overlap **100.0 %**. `T_N` =
+   0.7005 + 0.2580 downsep = **0.9585 s** ⇒ `k_b* = 166`, period **24.25 s (+2.7 %)** — reported,
+   not applied. Required a **pass-major** rewrite of `run_recipe` (all 56 graphs compiled up
+   front, then each pass walks the block) so that a pass is contiguous in time and can be
+   classified solo vs contended. **NEXT ACTION: (a) re-run `python tools/pipe/tn_recipe.py --dump`
+   to re-establish 448/448 exactness under the pass-major binary; (b) the exact stage's
+   `ffn.down` under contention (the 0.2580 s downsep is still solo); (c) then the real
+   Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's PSNR/SSIM leg and
+   `calibrate.py` are the host-only work, and Gate 5 is unrun.**
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
@@ -368,6 +376,11 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   25.8–50.7 % exact, and the surviving region is **not** a fixed rule: at `M=384` the last
   384-column block is 100 % while at `M=256/320` all four blocks are ~50.7 %. So there is no
   "correct subset" to exploit — either use the small exact shapes or accept a wrong result.
+- **All 56 exact-recipe graphs can be held at once** (measured 2026-11-16, `RESULTS_corun_recipe.md`):
+  compiling every column block up front and then running *pass-major* keeps each pass contiguous
+  in time, which is what lets a pass be classified as "ran alone" vs "ran while the GPU was busy".
+  P3.7c freed each GEMM's slots before compiling the next, which forced gemm-major order and made
+  every pass span the whole run — the same numbers (710.3 vs 716.4 ms solo) but unclassifiable.
 
 ## Definition of done for the course project
 

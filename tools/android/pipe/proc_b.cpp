@@ -650,16 +650,23 @@ static int run_recipe(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem, c
     int fails = 0;
     std::vector<double> pass_tot((size_t)reps + 1, 0.0);
     std::uint64_t execs_per_pass = 0;
+    std::vector<int8_t> out((size_t)ROW * (size_t)COL, 0);
 
+    struct RGraph { int g, c0, N; Slot s; };
+    std::vector<RGraph> graphs;
+
+    // Compile every column graph up front, so that one *pass* is contiguous in time.
+    // The gemm-major order P3.7c used spread each pass across the whole run, which cannot
+    // be split into "ran alone" vs "ran while the GPU was busy" samples — P3.7d needs that
+    // split to price the exact recipe under contention.
     for (size_t gi = 0; gi < gs.size(); ++gi) {
         const int g = gs[gi];
         if (g < 0 || g >= 9) { P("WARN|recipe_bad_gemm|%d|range=0..8", g); continue; }
         const int NOUT = GEMMS[g].N, K = GEMMS[g].K;
         if (K != KD) { P("FATAL|recipe_needs_K1536|%s|K=%d", GEMMS[g].name, K); return 2; }
 
-        std::vector<Slot> slots;
-        std::vector<int> cols;
         int gfail = 0;
+        const size_t first = graphs.size();
         const std::uint64_t c0t = hv::now_ns();
         for (int c0 = 0; c0 < NOUT; c0 += COL) {
             const int n = std::min(COL, NOUT - c0);
@@ -673,65 +680,90 @@ static int run_recipe(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem, c
                 ++gfail;
                 continue;
             }
-            slots.push_back(s);
-            cols.push_back(c0);
+            graphs.push_back(RGraph{g, c0, n, s});
         }
         const double gcms = (hv::now_ns() - c0t) / 1e6;
         compile_all += gcms;
-        if (slots.empty()) { ++fails; P("RECIPE|FAIL|g=%d|stage=compile_all|fails=%d", g, gfail); continue; }
+        const size_t got = graphs.size() - first;
+        if (!got) { ++fails; P("RECIPE|FAIL|g=%d|stage=compile_all|fails=%d", g, gfail); continue; }
         P("RECIPE|gemm|g=%d|name=%s|N_out=%d|K=%d|col_blocks=%zu|tiles_per_graph=%d|execs_per_pass=%zu"
-          "|compile_ms=%.1f|compile_fails=%d",
-          g, GEMMS[g].name, NOUT, K, slots.size(), nrow, slots.size() * (size_t)nrow, gcms, gfail);
+          "|compile_ms=%.1f|compile_fails=%d|t_ready=%.3f",
+          g, GEMMS[g].name, NOUT, K, got, nrow, got * (size_t)nrow, gcms, gfail,
+          hv::now_ns() / 1e6);
+    }
+    P("RECIPE|compiled|graphs=%zu|compile_ms=%.1f|fails=%d|t=%.3f", graphs.size(), compile_all, fails,
+      hv::now_ns() / 1e6);
+    if (graphs.empty()) { P("FATAL|recipe_no_graphs"); return 2; }
 
-        std::vector<int8_t> out((size_t)ROW * (size_t)COL, 0);
-        for (int p = 1; p <= reps; ++p) {
-            double gtot = 0;
-            bool dead = false;
-            for (size_t i = 0; i < slots.size() && !dead; ++i) {
-                double ms_sum = 0, ms_min = 1e9, ms_max = 0;
-                int ok = 0;
-                for (int t = 0; t < nrow; ++t) {
-                    double ms = 0;
-                    const int erc = exec_fc(slots[i], ROW, &A[(size_t)t * ROW * KD], out.data(), &ms);
-                    if (erc) {
-                        P("RECIPE|FAIL|g=%d|c0=%d|pass=%d|tile=%d|stage=exec|rc=%d(%s)",
-                          g, cols[i], p, t, erc, rcs(erc));
-                        dead = true;
-                        break;
-                    }
-                    ms_sum += ms;
-                    if (ms < ms_min) ms_min = ms;
-                    if (ms > ms_max) ms_max = ms;
-                    ++ok;
-                    if (p == 1 && !a.recipe_dump.empty()) {
-                        char fo[512];
-                        snprintf(fo, sizeof fo, "%s/g%d_c%d_t%02d_out.bin",
-                                 a.recipe_dump.c_str(), g, cols[i], t);
-                        const size_t outb = (size_t)ROW * (size_t)slots[i].n;
-                        const bool okd = write_blob(fo, out.data(), outb);
-                        P("RECIPE|dump|g=%d|c0=%d|N=%d|tile=%d|bytes=%zu|fnv_out=%016" PRIx64 "|ok=%d",
-                          g, cols[i], slots[i].n, t, outb,
-                          fnv(FNV0, out.data(), outb), okd ? 1 : 0);
-                    }
+    for (int p = 1; p <= reps; ++p) {
+        const std::uint64_t pt0 = hv::now_ns();
+        double gtot = 0;          // this GEMM's total inside this pass
+        int cur_g = -1;
+        std::uint64_t gt0 = 0;
+        bool dead = false;
+        for (size_t i = 0; i < graphs.size() && !dead; ++i) {
+            RGraph& rg = graphs[i];
+            if (rg.g != cur_g) {
+                if (cur_g >= 0) {
+                    const double macs = 2.0 * (double)nrow * ROW * GEMMS[cur_g].N * KD;
+                    pass_tot[(size_t)p] += gtot;
+                    P("RECIPE|pass|g=%d|name=%s|pass=%d|ms_tot=%.3f|gops=%.1f|t0=%.3f|t1=%.3f",
+                      cur_g, GEMMS[cur_g].name, p, gtot, macs / (gtot * 1e6 + 1e-9),
+                      gt0 / 1e6, hv::now_ns() / 1e6);
                 }
-                if (dead) break;
-                gtot += ms_sum;
-                if (p == 1) execs_per_pass += (std::uint64_t)ok;
-                P("RECIPE|col|g=%d|c0=%d|N=%d|pass=%d|execs=%d|ms_tot=%.3f|ms_mean=%.3f|ms_min=%.3f"
-                  "|ms_max=%.3f|gops=%.1f",
-                  g, cols[i], slots[i].n, p, ok, ms_sum, ms_sum / ok, ms_min, ms_max,
-                  2.0 * (double)ok * ROW * slots[i].n * K / (ms_sum * 1e6));
+                cur_g = rg.g;
+                gtot = 0;
+                gt0 = hv::now_ns();
             }
-            if (dead) { ++fails; break; }
+            double ms_sum = 0, ms_min = 1e9, ms_max = 0;
+            int ok = 0;
+            const std::uint64_t ct0 = hv::now_ns();
+            for (int t = 0; t < nrow; ++t) {
+                double ms = 0;
+                const int erc = exec_fc(rg.s, ROW, &A[(size_t)t * ROW * KD], out.data(), &ms);
+                if (erc) {
+                    P("RECIPE|FAIL|g=%d|c0=%d|pass=%d|tile=%d|stage=exec|rc=%d(%s)",
+                      rg.g, rg.c0, p, t, erc, rcs(erc));
+                    dead = true;
+                    break;
+                }
+                ms_sum += ms;
+                if (ms < ms_min) ms_min = ms;
+                if (ms > ms_max) ms_max = ms;
+                ++ok;
+                if (p == 1 && !a.recipe_dump.empty()) {
+                    char fo[512];
+                    snprintf(fo, sizeof fo, "%s/g%d_c%d_t%02d_out.bin",
+                             a.recipe_dump.c_str(), rg.g, rg.c0, t);
+                    const size_t outb = (size_t)ROW * (size_t)rg.N;
+                    const bool okd = write_blob(fo, out.data(), outb);
+                    P("RECIPE|dump|g=%d|c0=%d|N=%d|tile=%d|bytes=%zu|fnv_out=%016" PRIx64 "|ok=%d",
+                      rg.g, rg.c0, rg.N, t, outb, fnv(FNV0, out.data(), outb), okd ? 1 : 0);
+                }
+            }
+            if (dead) break;
+            gtot += ms_sum;
+            if (p == 1) execs_per_pass += (std::uint64_t)ok;
+            P("RECIPE|col|g=%d|c0=%d|N=%d|pass=%d|execs=%d|ms_tot=%.3f|ms_mean=%.3f|ms_min=%.3f"
+              "|ms_max=%.3f|gops=%.1f|t0=%.3f|t1=%.3f",
+              rg.g, rg.c0, rg.N, p, ok, ms_sum, ms_sum / ok, ms_min, ms_max,
+              2.0 * (double)ok * ROW * rg.N * KD / (ms_sum * 1e6 + 1e-9),
+              ct0 / 1e6, hv::now_ns() / 1e6);
+        }
+        if (dead) { ++fails; break; }
+        if (cur_g >= 0) {
+            const double macs = 2.0 * (double)nrow * ROW * GEMMS[cur_g].N * KD;
             pass_tot[(size_t)p] += gtot;
-            P("RECIPE|pass|g=%d|name=%s|pass=%d|ms_tot=%.3f|gops=%.1f",
-              g, GEMMS[g].name, p, gtot,
-              2.0 * (double)nrow * ROW * NOUT * K / (gtot * 1e6));
+            P("RECIPE|pass|g=%d|name=%s|pass=%d|ms_tot=%.3f|gops=%.1f|t0=%.3f|t1=%.3f",
+              cur_g, GEMMS[cur_g].name, p, gtot, macs / (gtot * 1e6 + 1e-9),
+              gt0 / 1e6, hv::now_ns() / 1e6);
         }
-        for (size_t i = 0; i < slots.size(); ++i) {
-            ANeuralNetworksCompilation_free(slots[i].comp);
-            ANeuralNetworksModel_free(slots[i].model);
-        }
+        P("RECIPE|passend|pass=%d|block_ms=%.3f|t0=%.3f|t1=%.3f", p, pass_tot[(size_t)p],
+          pt0 / 1e6, hv::now_ns() / 1e6);
+    }
+    for (size_t i = 0; i < graphs.size(); ++i) {
+        ANeuralNetworksCompilation_free(graphs[i].s.comp);
+        ANeuralNetworksModel_free(graphs[i].s.model);
     }
 
     for (int p = 1; p <= reps; ++p)

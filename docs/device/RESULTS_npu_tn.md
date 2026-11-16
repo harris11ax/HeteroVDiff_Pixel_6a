@@ -259,14 +259,22 @@ the graphs executed on the accelerator rather than the CPU.
    per-tensor-where-cheap would cover only `attn2.to_k`+`attn2.to_v` = **10.2 % of block MACs**.
    **The choice stays the student's; both branches now have numbers.**
 
-6. **`T_N` on the exact recipe (P3.7c) — done 2026-11-16 01:36.** The only graph geometry this HAL
-   returns bit-exactly (P3.7b: `N ∈ {128,384,768}` × `M ≤ 200`) costs **0.7164 s/block** for the
-   nine GEMMs — **1.90× the 377.8 ms 9-graph stage, at 140 GOPS instead of 265**, **56
-   compilations (8.64 s) / 448 executes** per 1536-token block — and returns **448/448 tiles
-   bit-exact (Δ = 0 LSB)** including `ffn.up`'s tail-128 block, verified against the raw weight
-   bytes. Four runs, 0.3 % spread. → `docs/device/RESULTS_tn_recipe.md`, tool
-   `tools/pipe/tn_recipe.py`, capture `tn_recipe_20261116_013625`. `solve_cut.py` on the measured
-   pair gives `k_b* = 166`, period 24.47 s (**+3.6 %** for a correct stage); **reported, not
-   applied** — the 0.7164 is solo and the locked 0.6484 is co-run. **Next: the co-run treatment of
-   the exact recipe** (and, if it survives, the 8.64 s/block compile amortised over the 10-chunk
-   run).
+6. **`T_N` on the exact recipe — done in two steps.** **P3.7c (2026-11-16 01:36): solo cost.**
+   The only graph geometry this HAL returns bit-exactly (P3.7b: `N ∈ {128,384,768}` × `M ≤ 200`)
+   costs **0.7164 s/block** for the nine GEMMs — **1.90× the 377.8 ms 9-graph stage, at 140 GOPS
+   instead of 265**, **56 compilations (8.64 s) / 448 executes** per 1536-token block — and
+   returns **448/448 tiles bit-exact (Δ = 0 LSB)** including `ffn.up`'s tail-128 block, verified
+   against the raw weight bytes. Four runs, 0.3 % spread. → `docs/device/RESULTS_tn_recipe.md`,
+   tool `tools/pipe/tn_recipe.py`, capture `tn_recipe_20261116_013625`.
+   **P3.7d (2026-11-16 02:09): the co-run treatment, because 0.7164 was solo.** → 
+   `docs/device/RESULTS_corun_recipe.md`, tool `tools/corun/co_recipe.py`, capture
+   `corun_recipe_20261116_020926`. Under GPU load the recipe costs **700.5 ms/block** vs
+   **707.0 ms** before the GPU joined in the same run (**−0.9 %: contention is not measurable**),
+   while the GPU block reads **146.05 ms** contended vs **160.27 ms** solo (the same "faster under
+   load" direction as action 4; cause still DVFS-unestablished). `T_N` = 0.7005 + 0.2580 downsep
+   (**still solo**) = **0.9585 s** ⇒ `k_b* = 166`, period **24.25 s (+2.7 %)** — **reported, not
+   applied**. To make a pass classifiable, `run_recipe` is now **pass-major** (all 56 graphs
+   compiled up front, then each pass walks the block); sanity run `tn_recipe_…_020353` reproduces
+   710.3 ms solo. **Next for this line: re-run `tn_recipe.py --dump` to re-establish 448/448
+   exactness under the pass-major binary (P3.7c's dump was gemm-major), and measure the downsep
+   `ffn.down` under contention so no part of the exact `T_N` is solo.**
