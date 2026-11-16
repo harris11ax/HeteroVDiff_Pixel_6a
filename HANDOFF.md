@@ -126,8 +126,10 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    is **null** (no alpha tensor exists in the checkpoint — copy it from the reference repo, do not
    guess), and the spec's 60×40-latent-pixel tile **degenerates to one tile** at Preset A (latent
    plane is 34×60).
-8. Mid-block VAE attention (32.4 GMAC) is the last unmeasured rate; it is the only thing keeping `T_V`
-   a lower bound. Needs a GEMM rate at 6120 tokens × 384 ch on both engines.
+8. **NEXT ACTION (device; item 7 is done except the torch-blocked bits).** Mid-block VAE attention
+   (32.4 GMAC) is the last unmeasured rate; it is the only thing keeping `T_V`
+   a lower bound. Needs a GEMM rate at 6120 tokens × 384 ch on both engines — 16 token tiles at
+   M ≤ 384 on the NPU (one graph per tile, never a batched graph), one dispatch on Mali.
 9. Phase 3 executors, Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
