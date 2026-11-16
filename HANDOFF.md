@@ -147,10 +147,21 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    soaked for 23.5 s. Tool: `python tools/npu/sustain_npu.py --rounds 60`.
 10. **NEXT ACTION (Phase 3, Gates 3–5).** Every rate the cut needs is now measured and drift-checked; build the
    two-process pipeline that streams ≥10 chunks on the phone: GPU process on blocks `[0,160)`, NPU
-   process on `[160,180)` + decode, one handoff per chunk, no manual intervention. Start with the
-   chunk handoff (one file-mapped artifact, no second INT8 copy) and prove 2 chunks before 10.
+   process on `[160,180)` + decode, one handoff per chunk, no manual intervention.
    **Build order is written down: `phase3_pipeline/PLAN.md`** (P3.1 handoff selftest → P3.2 GPU stage →
-   P3.3 NPU stage → P3.4 coordinator/2 chunks → P3.5 10 chunks → P3.6 Gate 4); next tick starts P3.1.
+   P3.3 NPU stage → P3.4 coordinator/2 chunks → P3.5 10 chunks → P3.6 Gate 4).
+   **P3.1 DONE 2026-11-15 22:03** → `docs/device/RESULTS_handoff_p31.md`: `phase3_pipeline/handoff.h` +
+   `tools/android/pipe/handoff_selftest.cpp` + `tools/pipe/handoff_selftest.py`. 200 chunks × 2 configs,
+   **0 mismatching words of 587,520 per chunk, 200/200 in order**, publish→consume **680.9 µs** mean
+   (661.7 median / 1023 µs max) free-running, **2541.4 µs** at a 1 ms consumer stall; `msync` 4 KiB
+   median **63.7 µs**; ring file exactly **9,408,512 B = 2 slots**; split `--role producer|consumer`
+   launch from two adb sessions passes 30/30. Producer blocked on 198/200 chunks even free-running, so
+   the 2-slot ring's `done` gate is the normal path, not an edge case.
+   **NEXT TICK: P3.2 — `tools/android/pipe/proc_a.cpp`**, the GPU stage over the real artifact: mmap the
+   INT8 weights (route B), run the existing tiled `gemm8.cl` block kernel for `k` blocks, write the
+   residual payload into slot `(i-1) % 2` via `handoff.h`, emit `TS|gpu|…` per block. Target check
+   against the measured **0.1474 s** co-run base block — reuse `tools/android/gemm/kernels/`, do not
+   rewrite the kernel.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.

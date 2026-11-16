@@ -46,13 +46,15 @@ struct SlotHdr {           // 64 B, one per slot
 
 ## Build order (one item per tick)
 
-- **P3.1 — handoff primitive, no compute.** `phase3_pipeline/handoff.h` +
-  `tools/android/pipe/handoff_selftest.cpp`: one process plays producer, one
-  consumer, 200 chunks, each payload stamped with its chunk index; the consumer
-  verifies every index in order and every `t_cons > t_prod`. Pass criteria: 0
-  mismatches, per-chunk publish→consume latency reported, run under `adb shell`
-  with the phone otherwise idle. This is the only unit that can be written and
-  trusted without any engine loaded.
+- ~~**P3.1 — handoff primitive, no compute.** `phase3_pipeline/handoff.h` +
+  `tools/android/pipe/handoff_selftest.cpp`~~ — **done 2026-11-15 22:03**,
+  `docs/device/RESULTS_handoff_p31.md`: 200 chunks × 2 configurations, **0
+  mismatching words, 200/200 in order**, publish→consume **680.9 µs** mean
+ (661.7 median, 1023 µs max) free-running and **2541.4 µs** with a 1 ms consumer
+  stall; `msync` 4 KiB median **63.7 µs**; ring file exactly **9,408,512 B**.
+  Split launch (`--role producer|consumer` from two adb sessions) also passes.
+  Producer blocks on 198/200 chunks even free-running — back-pressure is the
+  normal path, which is why two slots are required rather than nice to have.
 - **P3.2 — GPU stage over real weights.** `tools/android/pipe/proc_a.cpp`: mmap the
   artifact, run the existing tiled INT8 GEMM block (`gemm8.cl`) for k blocks, write
   the residual payload into the slot. Timing per block emitted as `TS|gpu|..`.
