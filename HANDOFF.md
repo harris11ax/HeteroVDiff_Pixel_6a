@@ -313,10 +313,10 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  System32 before PATH ⇒ the build silently never ran, rc 127), now routed through
  `probe_host.bash_bin()` for every tool; and a single confirm sample no longer aborts a floor-grade
  run (it re-enters the wait loop).
- **NEXT ACTION: (a) a floor-started `tools/corun/co_recipe.py` run
- (`--delay 6 --reps 24`) — the only measurement that separates contention from thermal/order for
- the exact recipe, because its first contended passes arrive while the TPU is still near the floor
- (compare its crossing passes to 646.7 ms, not to 707); (b) `ffn.down` under contention (0.2580 s
+ **NEXT ACTION: (a) the network A/B (host-cheap, ~25 s of device time): at the
+ floor with the device **network ON**, `python tools/pipe/tn_recipe.py --reps 8`. 707 ms ⇒ background
+ load inflates per-execute wall time (and every rate measured with the network on carries ~10 %);
+ ~647 ms ⇒ the 02:09 numbers were a device-state artifact; (b) `ffn.down` under contention (0.2580 s
  downsep still solo); (c) the real Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's
  PSNR/SSIM leg and `calibrate.py` are the host-only work, Gate 5 is unrun.**
  **P3.7f DONE 2026-11-16 02:38 — the solo rate is settled and does not derate in 26→33 °C** →
@@ -328,6 +328,19 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  time, never 707) and **thermal above ~34 °C is untested** — 40 passes only reach 33 °C, whereas
  the co_run climbed to 45 °C on the GPU's heat. The decisive run therefore has to walk the
  temperature range *and* bank floor-grade solo passes in one go.
+   **P3.7g DONE 2026-11-16 02:40 — the co-run settles contention, and kills the thermal story ** →
+   `RESULTS_corun_recipe.md` §P3.7g, capture `corun_recipe_20261116_024049` (`--delay 6 --reps 24`,
+   gate PASS at TPU 26.0, overlap **99.06 %**, TPU **26 → 45 °C**): contended recipe
+   **635.8 ms/block** (per-pass warm median 637.3, n=24, 634.5–659.4) vs **646.7 / 647.9 ms solo** from
+   two GPU-free runs, GPU block **158.95 → 146.08 ms**. **The delay is measured from launch, so the
+   compile lands inside it and every pass here was contended** (`npu_solo_*` null for that reason) —
+   which makes it sharp: **no contention penalty** (contended ≈ solo, if anything slightly faster) and
+   **no derate at 45 °C** (post-join passes flat 633.6–639.0 while the zone climbed). That kills
+   P3.7d's 707.0 baseline *and* the "derate above 34 °C" candidate. **Still unexplained: the 11 %
+   between the 02:09 run (707) and tonight (637) on the same binary/block; the only environmental
+   change is that the device network/background services were ON at 02:09 and OFF since.** If
+   background CPU load inflates the 448 synchronous executes, the network-on rates in
+   `RESULTS_stream_p35.md` (32.72 s period) carry ~10 % too — hence next action (a).
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.

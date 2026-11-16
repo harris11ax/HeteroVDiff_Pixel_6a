@@ -87,3 +87,43 @@ slower" and "9-graph stage, 25.8 % of tiles correct" is the student's.
 - the pilot `…_020535` shows why the control matters: with only passes 2–3 as the "solo" side its
   in-run control read 653.8 ms (a 2-sample median), which would have implied a false 7 %
   contention penalty. The later capture, with a 3-pass control and 24 passes, reads −0.9 %.
+
+---
+
+## P3.7g — floor-started co-run, 99.1 % overlap, TPU 26 → 45 °C: no contention term **and** no derate
+
+Capture `corun_recipe_20261116_024049`, `--delay 6 --reps 24 --gpu-iters 60`, gate **PASS at start**
+(TPU 26.0 · skin1 24.2 · skin2 24.8 · VIRTUAL-SKIN 24.0 · battery 22.7).
+
+| quantity | this run | reference |
+|---|---|---|
+| exact recipe, **contended** (per-pass total) | **635.8 ms/block** | 700.5 ms in `…_020926` |
+| per-pass warm median (n = 24) | **637.3 ms** (634.5 – 659.4; pass 10 = 659.4 is the GPU's first block) | 701.1 ms |
+| GPU base block, solo → contended | **158.95 → 146.08 ms** (n = 8 → 43) | 160.27 → 146.05 ms |
+| overlap (CLOCK_MONOTONIC) | **99.06 %** of GPU-time inside recipe executes | 100.0 % |
+| TPU zone over the run | **26.0 → 45.0 °C** | 26.0 → 45.0 °C |
+
+**Read the delay correctly: it starts at launch, and pass 1 comes after the ~9.6 s compile.** So the
+GPU had already joined when pass 1 ran — `analysis.npu_solo_*` is `null` for exactly that reason, and
+**every pass here is contended**. That is what makes the result sharp:
+
+- **Contended is not slower.** 635.8 ms contended (this run) against **646.7 / 647.9 ms solo** (two
+  GPU-free runs, P3.7e/P3.7f) — the recipe is, if anything, marginally *faster* with the GPU busy,
+  the same direction the GPU itself shows (146 vs 159 ms). **P3.7d's 707.0 ms "solo" baseline is not
+  reproducible and its −0.9 % "contention is a non-event" should be replaced by this.**
+- **No thermal derate at 45 °C.** The nine contended passes after the join read 633.6–639.0 ms while
+  the TPU zone climbed to 45 °C — flat, consistent with P3.7f's 40-pass series (+0.16 % over 26→33 °C).
+  So "derate above ~34 °C" is **dead** as an explanation.
+
+**Which leaves the 707 ms of `…_020926` unexplained by either candidate, and it matters.** The 02:09
+run and tonight's runs use the *same* binary and the *same* block. The measured difference is 11 %.
+The one environmental variable known to have changed between them: **the device's network/background
+services were ON at 02:09 and OFF for every run since** (switched off at 02:2x to reach the idle
+floor). A background-loaded CPU inflating per-execute wall time (448 executes/block, each a
+synchronous NNAPI round trip) is the leading, *untested* candidate. If it holds, every rate measured
+with the network on carries a ~10 % penalty, which would reach back into `RESULTS_stream_p35.md`
+(32.72 s period) — so it is worth one cheap A/B before anyone quotes those as clean.
+
+**Next measurement (host-cheap, ~25 s of device time):** at the floor with **network ON**, run
+`python tools/pipe/tn_recipe.py --reps 8`. Floor + network on + ~707 ms ⇒ background load is the
+cause; floor + network on + ~647 ms ⇒ the 02:09 numbers are a device-state artifact of that session.
