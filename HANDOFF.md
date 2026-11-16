@@ -1,5 +1,30 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
+*Updated 2026-11-16 (09:35, **P3.16 — layer 34 is NEITHER its residual add's grid NOR the
+`conv_out` 96→3 shape: both priced, together worth 0.003 dB.** Host-only, four simulator
+arms, **no device run and no device rate touched**: `vae_sim.py --layer34` → arms
+`wire` / `add34` (the residual add after conv 34 summed in float32, no int8 hop) /
+`coutpc` (three per-output-channel output scales on `conv_out`) / `both34`, capture
+`vae_sim_l34_20261116_092942`. **Validator: `wire` reproduces P3.15 to the digit**
+(20.5876 dB / 0.888501 / worst layer 34 0.714915). **`add34` +0.0016 dB, `coutpc`
++0.0015 dB, `both34` +0.0031 dB — and layer 34 stays at 0.7149 in all four**, i.e. the
+worst layer does not move at all. Two corrections measured: **P3.11's "4.76×" is the add
+after conv 32, not 34** — layer 34's ratio is **4.18×** (0.33601 / 0.080382) and the range
+across all 14 sites is **1.39–6.13×**, with clamp never above **0.52 %**; and
+**`conv_out`'s three channel maxima are 1.1442 / 1.0510 / 1.2086 = a 1.15× spread**, with
+the single `sa_out` 0.0112168 calibrated 18 % above the largest, so per-channel has
+nothing to win — and a trap: **per-channel requant with scalar dequant is −0.11 dB**
+(20.4792 vs 20.5891), the gain and the cost being the same size. What is left at layer 34
+is inherited-vs-intrinsic, which needs the oracle-input probe. `T_V` 8.908 s, `T_N` exact
+0.8905 s/block, `k_b*` 165 untouched. → `docs/device/RESULTS_vae_l34.md`.*
+**NEXT ACTION, in order: (a) the ORACLE-INPUT arm** — feed each conv the reference's own
+input quantised at the program's `SA_in` and score its output; intrinsic-bad (~0.85 at
+layer 34) ⇒ the site, input-inherited (~0.99) ⇒ upstream. Host-only, one walk, and it is
+the last thing that can attribute the decode's remaining ~18 dB at all; **(b)** the
+layer-11/20 3-frame-vs-2-frame `time_conv` support; **(c)** then `proc_b --decode 1` →
+`convwire`, and Gate 5. The `post_quant_conv` branch (+7.32 dB, edits the artifact) still
+waits on the student's call.**
+
 *Updated 2026-11-16 (08:44, **P3.15 — the accumulating scheme is priced, and it is NOT the
 missing 18 dB; the absent `post_quant_conv` is worth +7.32 dB.** Four simulator arms
 (bias placement × requant granularity) plus the missing op, **host-only, no device run**:
@@ -648,6 +673,14 @@ simulator, no device needed — **DONE 08:33, see P3.15 at the top**: two are wo
 (b) the layer-11/20 3-frame-vs-2-frame `time_conv` support; (c) then `proc_b --decode 1`
 → `convwire`, and Gate 5.**
 10. Phase 4 tables, report.
+11. **Layer 34's remaining question — the oracle-input probe (P3.16).** Both static
+   candidates are priced and refuted (`RESULTS_vae_l34.md`: `add34` +0.0016 dB, `coutpc`
+   +0.0015 dB, layer 34 stays 0.7149 in every arm). What is left is whether conv2 adds its
+   own error or inherits conv1's (input already at 0.8618): run each conv on **the
+   reference's own input** quantised at the program's `SA_in` and score its output —
+   intrinsic-bad ⇒ the site (weights/scale/gather), input-inherited ⇒ upstream. Host-only,
+   one walk (~3.5 min), extends `vae_sim.py` with `--oracle`; the reference trace already
+   dumps a conv input for the two `resample.1` layers, so this generalises an existing hook.
 
 ## Decisions already locked (do not reopen without saying why)
 
