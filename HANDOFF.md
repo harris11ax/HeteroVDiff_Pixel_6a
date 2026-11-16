@@ -1,7 +1,8 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (00:0x, P3.5a landed). This file is the orders sheet: read it first, then
-`docs/00_START_HERE.md`. The `T_N` harness landed with this update; last commit before it: `8280bbc`.*
+*Updated 2026-11-16 (00:10, **P3.5 landed — 10 chunks streamed end to end**). This file is the
+orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
+`docs/device/RESULTS_stream_p35.md`; the run is capture `stream_20261116_000415`.*
 
 ## Mission
 
@@ -204,14 +205,27 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    +3.0 s zero-copy import and +5.7 s per-GEMM closure barriers; `solve_cut.py` on the measured
    pairs gives **k_b* = 157** (`T_G` 0.1662, 26.09 s) / **150** (0.2021, 30.32 s) vs the locked
    160 — reported, not applied.
-   **NEXT TICK: P3.5 proper — 10 chunks.** `stream.py --chunks 10 --nblocks 20 --pub-every 160
-   --hash-every 20 --timeout 900`. **Do not run it inside one blocking call**: 10 × 32.5 s =
-   325 s of GPU stream plus NPU and pushes, so launch it with `terminal(background=true)` **and**
-   write `docs/device/.measurement_in_flight` (what was launched + where its artifact lands);
-   the next tick verifies/collects it, adds analysis, commits, deletes the marker. Gate first
-   (`cool_rerun.py` if the TPU zone is over `battery + 3`). What it answers: the steady-state
-   overlap (2 chunks structurally understates it — the last chunk's NPU work cannot overlap
-   anything) and the measured 10-chunk period against 32.54 s.
+   **P3.5 DONE 2026-11-16 00:04** → `docs/device/RESULTS_stream_p35.md`, capture
+   `stream_20261116_000415` (10 chunks × 160 GPU blocks + 20 NPU blocks, table-grade start
+   TPU 25.0 vs 25.5): PASS 10/10 published + 10/10 consumed, **1600** GPU blocks,
+   **7200/7200** executes, wall 370.4 s. Three numbers: (a) **steady-state period 32.72 s**
+   (chunks 2–7, 32.61–32.81) — P3.5a's 32.544 was not a startup artifact; (b) overlap
+   **90.02 % of NPU busy = the structural ceiling `(N-1)/N` for N=10**, so the coordinator is
+   not what costs time — the GPU is the long pole by 4.13×; (c) **NEW: the Mali stage derates
+   +35.1 % at block ~1135 (232 s of GPU work in), a step not a drift** (203.0 → 274.2 ms median,
+   no recovery; NPU flat 396.5 → 394.0 ms in the same window; the post-stream one-closure pass
+   measures 251.2 ms vs 166.2 cold, so it is engine-wide). Period becomes 43.90 s in that regime;
+   run average 35.6 s. `T_G` = 0.2742 (derated) → `k_b*` **138 / 37.87 s** vs locked 160 /
+   23.61 s — **reported, not applied**. Cause of the derate not established (DVFS or thermal
+   trip; no readable GPU clock) and the one-closure/staging forms were not measured derated —
+   that is the cheapest next measurement, `stream.py --chunks 10 --pub-every 160 --once-blocks 0`
+   style re-run with the closure form reduced.
+   **NEXT ACTION (P3.6 / Gate 4):** the pipeline now satisfies deliverable 3's "≥ 10 chunks"
+   bar; what Gates 3–5 still lack is **numerical parity across the handoff + the decode as an
+   execution** (`--decode 1` is a no-op stub today). Build P3.6: proc_a fills payload → proc_b
+   checksum vs an int32 reference for the same block, and wire the measured 10.554 s TPU decode
+   into the NPU stage as real work instead of a cited constant. Gate 1's end-to-end PSNR/SSIM leg
+   and `calibrate.py` remain host-only work for a tick when the phone is absent or hot.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
