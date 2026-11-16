@@ -275,6 +275,9 @@ the graphs executed on the accelerator rather than the CPU.
    (**still solo**) = **0.9585 s** ⇒ `k_b* = 166`, period **24.25 s (+2.7 %)** — **reported, not
    applied**. To make a pass classifiable, `run_recipe` is now **pass-major** (all 56 graphs
    compiled up front, then each pass walks the block); sanity run `tn_recipe_…_020353` reproduces
-   710.3 ms solo. **Next for this line: re-run `tn_recipe.py --dump` to re-establish 448/448
-   exactness under the pass-major binary (P3.7c's dump was gemm-major), and measure the downsep
-   `ffn.down` under contention so no part of the exact `T_N` is solo.**
+   710.3 ms solo. **`ffn.down` under contention — done 2026-11-16 03:47** (`RESULTS_corun_recipe.md` §P3.7j):
+ 62.769 ms/tile solo ⇒ 0.2511 s/block vs 63.334 contended ⇒ 0.2533 s (+0.90 %, inside the arm
+ spread) — no contention penalty. `T_N` exact is now co-run end to end: **0.8905 s/block** ⇒
+ `k_b*` 165, 24.21 s, reported not applied. **448/448 exactness under the pass-major binary is
+ also established** (P3.7e, `tn_recipe_20261116_023152`, Δ = 0 LSB). **This line is closed**; the
+ live next actions are in `HANDOFF.md` (SA → device, `--decode 1`, Gate 5).
