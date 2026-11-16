@@ -133,7 +133,7 @@
     "T_N_s_per_block": 0.6484,
     "T_N_solo_s_per_block": 0.6758,
     "T_V_s_per_chunk": null,
-    "status": "MEASURED CO-RUN. T_G co-run = 0.1474 s/block (median of 25 base-block samples, 99.8% of GPU-time overlapping NPU executes; same-session solo 0.1600); T_N co-run = 0.6484 s/block (9 GEMMs at 0.3904 under GPU load + 0.2580 downsep). T_N/T_G = 4.40. T_V = 10.554 s/chunk on the TPU (conv MACs; mid-block attention still unmeasured, so a lower bound), 12.256 s on Mali. The locked co-run precondition in 'note' is therefore satisfied for T_G and T_N. Still TBD: mid-block VAE attention (0.63% of T_V -> shifts k_b* by ~0.09 blocks, immaterial), ffn.down under contention, throttling over a 23.5 s continuous NPU stage, per-tensor-scale parity.",
+    "status": "MEASURED CO-RUN. T_G co-run = 0.1474 s/block (median of 25 base-block samples, 99.8% of GPU-time overlapping NPU executes; same-session solo 0.1600); T_N co-run = 0.6484 s/block (9 GEMMs at 0.3904 under GPU load + 0.2580 downsep). T_N/T_G = 4.40. T_V = 10.554 s/chunk on the TPU (conv MACs; mid-block attention still unmeasured, so a lower bound), 12.256 s on Mali. The locked co-run precondition in 'note' is therefore satisfied for T_G and T_N. Still TBD: mid-block VAE attention (0.63% of T_V -> shifts k_b* by ~0.09 blocks, immaterial), ffn.down under contention, throttling over a 23.5 s continuous NPU stage. Per-tensor-scale parity is now MEASURED (2.15x mean GEMM error, 6/40 Gate-1 cosine failures) - see gate_4_parity and docs/device/RESULTS_scales.md; it is no longer a rate caveat, only an open student decision.",
     "note": "must be measured with both engines co-running, at the target resolution and thermal state; report the solo number as a kernel rate only",
     "T_N_partial_9of10_s_per_block": 0.4178,
     "T_N_partial_note": "sum of 9/10 GEMMs at M=384 x 4 token tiles = 70.3% of block MACs, GATE-COMPLIANT cool start (TPU 29.0 C vs 29.1 C gate); superseded by T_N_s_per_block once ffn.down was measured",
@@ -180,8 +180,10 @@
       "targets": "every timed run starts at max(SoC zone) <= ambient + 3 C"
     },
     "gate_4_parity": {
-      "status": "pending",
-      "targets": "per-block cosine >= 0.999 vs FP32; frame PSNR >= 28 dB, SSIM >= 0.92"
+      "status": "partial - GEMM-level cosine measured, frame-level PSNR/SSIM still pending",
+      "targets": "per-block cosine >= 0.999 vs FP32; frame PSNR >= 28 dB, SSIM >= 0.92",
+      "evidence": "docs/device/RESULTS_scales.md - 40 GEMM instances (blocks 0/5/15/29 x 10 GEMMs) against a float64 reference on the real FP32 checkpoint, activation per-tensor in both arms so the delta is layout-only. Output cosine >= 0.999: per-column 40/40 pass (min 0.999864), per-tensor 34/40 (6 fail, worst 0.996820). Weight cosine >= 0.999: per-column 40/40 (min 0.999926), per-tensor 35/40 (worst 0.996892).",
+      "not_measured": "full-block cosine over the composed 10-GEMM chain, and PSNR/SSIM on decoded frames (needs the quantiser + FP32 reference path)"
     },
     "gate_5_memory": {
       "status": "pending",
@@ -244,7 +246,7 @@
     "reduction_dim_ceiling": 1664,
     "reduction_dim_note": "one FULLY_CONNECTED [N=1536,K] compiles at K=1280/1536/1600/1664 (0.34-0.52 s) and fails OP_FAILED from K=1792 up (46-59 s; K=8960 also gave DEAD_OBJECT after 62 s). ffn.up - the same 13.7 MB of weights at K=1536 - compiles in 1.44 s, so the ceiling is the reduction dim, not N or weight bytes. The support query reports every one of those shapes 'supported', so it is not a viability test. Chunk to <=1664, one compilation per op (ffn.down = 7x FC[1536,1280] + 6x ADD, 2.57 s total); chunking inside a single graph does NOT work (down2 = 2x K=4480 + ADD, all ops supported, compile OP_FAILED at 47.8 s).",
     "graph_shape": "one graph per (block, token-tile); whole-block graphs validated and were SUPPORTED by google-edgetpu but Compilation_finish REBOOTED THE DEVICE (2026-11-15) -> one graph per GEMM is the only viable path",
-    "weight_scales": "per-tensor only: TENSOR_QUANT8_SYMM_PER_CHANNEL is rejected by FULLY_CONNECTED with addOperation BAD_DATA(4), so the per-output-column scheme cannot be expressed on the NPU stage; decision pending (see docs/device/RESULTS_npu_tn.md section 2)",
+    "weight_scales": "per-tensor only: TENSOR_QUANT8_SYMM_PER_CHANNEL is rejected by FULLY_CONNECTED with addOperation BAD_DATA(4), so the per-output-column scheme cannot be expressed on the NPU stage. DECISION PENDING, but no longer a guess - the cost is measured on the real checkpoint (docs/device/RESULTS_scales.md, 40 GEMM instances = blocks 0/5/15/29 x 10): per-tensor costs 2.15x the mean GEMM output error (3.01% vs 1.40%; median-of-ratios 1.74x, worst 5.44x) and breaks the Gate-1 cosine>=0.999 bar on 6/40 outputs (worst 0.996820), where per-column breaks 0/40 (min 0.999926). The penalty is a WEIGHT property, not a shape property: it tracks per-column scale spread at r=0.805 (per-column error vs spread r=0.101), so a shape-based restriction is unsupportable; the only defensible restriction is per-tensor-where-cheap, attn2.to_k + attn2.to_v = 10.2% of block MACs, leaving 89.8% of block MACs unable to use the NPU under the locked quantisation.",
     "uncompilable_shape": "FC with K=8960 (ffn.down) -> OP_FAILED at 47.2 s / DEAD_OBJECT at 62.0 s, reproduced in fresh processes; it is the K>1664 ceiling, not this shape (see reduction_dim_ceiling). Both workarounds are now MEASURED: chunked 7x FC[1536,1280] + 6x ADD on the TPU = 0.2580 s/block (163.9 GOPS); Mali tiled = 0.04733 s/block (893 GOPS) -> the TPU is 5.45x slower for this GEMM. Engineering recommendation: ffn.down on Mali whichever way the cut lands; the decision is the student's",
     "measured_per_gemm_ms_per_tile_at_M384": {
       "attn_1536x1536": 8.02,
