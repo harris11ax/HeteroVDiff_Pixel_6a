@@ -47,6 +47,7 @@ R_SEQ = "/data/local/tmp/vae_seq.txt"
 R_W = "/data/local/tmp/vae_int8.bin"
 R_SC = "/data/local/tmp/vae_scales.f32"
 R_BI = "/data/local/tmp/vae_bias.f32"
+R_SA = "/data/local/tmp/vae_sa.f32"
 
 ZONE_KEYS = ("TPU", "skin_therm1", "skin_therm2", "battery", "VIRTUAL-SKIN")
 FATAL_STOP = ("OP_FAILED", "DEAD_OBJECT", "BAD_STATE")
@@ -263,6 +264,19 @@ def main() -> int:
             print(f"push failed for {src}: {txt}", file=sys.stderr)
             return 2
         print(f"pushed {src.name} -> {dst}")
+    # The measured per-layer activation scale (phase1_quant/vae_sa.py). Optional:
+    # without it the device falls back to 1/127 and says `sa=nominal`.
+    sa_local = VAE_DIR / "act_scales_f32.bin"
+    sa_sha = None
+    if sa_local.exists():
+        rc, txt = run([str(ADB), "-s", serial, "push", str(sa_local), R_SA], timeout=120)
+        if rc != 0:
+            print(f"push failed for {sa_local}: {txt}", file=sys.stderr)
+            return 2
+        sa_sha = sha32(sa_local)
+        print(f"pushed {sa_local.name} ({sa_local.stat().st_size} B, sha {sa_sha}) -> {R_SA}")
+    else:
+        print("WARNING: no act_scales_f32.bin — the device will run at sa=nominal")
     adb(serial, f"shell chmod 755 {REMOTE_BIN}")
 
     adb(serial, "logcat -c")
@@ -278,6 +292,7 @@ def main() -> int:
     doc = {"serial": serial, "timestamp": ts, "cmd": cmd, "rc": rc,
            "bin_sha": sha32(BIN), "plan_sha": hashlib.sha256(text.encode()).hexdigest()[:16],
            "weights_sha": sha32(VAE_DIR / "weights_int8.bin"),
+           "act_scales_sha": sa_sha,
            "layers_planned": layers, "layers": args.layers, "pc": args.pc,
            "thermal": {"before": zones0, "after": zones1, "gate": gate, "verdict": verdict},
            "parsed": rec, "logcat_tail": log[-4000:]}
@@ -287,6 +302,7 @@ def main() -> int:
     s = (rec["summary"] or [{}])[0]
     md = [f"# VAE decode execution (`convseq`) — {ts}", "",
           f"serial `{serial}` · binary `{doc['bin_sha']}` · weights `{doc['weights_sha']}` · "
+          f"act-scales `{sa_sha or 'none (nominal)'}` · "
           f"layers={args.layers or 'all'} pc={args.pc} rc={rc}", "",
           "## Thermal", "",
           "- before: " + " ".join(f"{k}={v:.1f}" for k, v in sorted(zones0.items()) if k in ZONE_KEYS),
@@ -302,15 +318,25 @@ def main() -> int:
                f"| wall (whole run) | **{s.get('wall_s')} s** |",
                f"| MACs | {s.get('macs')} |",
                f"| effective | {s.get('gops')} GOPS |",
-               f"| per-channel used | {s.get('pc')} (fallbacks {s.get('pc_fallbacks')}) |", ""]
+               f"| per-channel used | {s.get('pc')} (fallbacks {s.get('pc_fallbacks')}) |",
+               f"| activation scale | **{s.get('sa')}** (table {sa_sha or '—'}) |",
+               f"| bias int32 clamps | {s.get('bias_clamps')} |", ""]
     if rec["layer"]:
-        md += ["## Per layer", "", "| layer | frames | taps | executes | ms | GOPS | plan ms |",
-               "|---|---|---|---|---|---|---|"]
+        md += ["## Per layer", "",
+               "| layer | frames | taps | executes | ms | GOPS | plan ms | SA | epi ms | clamp |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
         for L in rec["layer"]:
             pl = next((x["plan_ms"] for x in layers if x["name"] == L["name"]), None)
             md.append(f"| `{L['name']}` | {L['frames']} | {L['taps']} | {L['executes']} | "
-                      f"{L['ms']:.1f} | {L['gops']:.1f} | {pl} |")
+                      f"{L['ms']:.1f} | {L['gops']:.1f} | {pl} | {L.get('sa', float('nan')):.5f} | "
+                      f"{L.get('epi_ms', float('nan')):.1f} | {L.get('clamp', float('nan')) * 100:.2f} % |")
         md.append("")
+        tot_ms = sum(L["ms"] for L in rec["layer"])
+        tot_epi = sum(L.get("epi_ms") or 0.0 for L in rec["layer"])
+        if tot_ms > 0:
+            md += [f"Epilogue share of the layer walk: **{tot_epi / tot_ms * 100:.1f} %** "
+                   f"({tot_epi / 1000:.2f} s of {tot_ms / 1000:.2f} s). "
+                   f"Worst saturation {max((L.get('clamp') or 0.0) for L in rec['layer']) * 100:.2f} %.", ""]
     if rec["fatal"]:
         md += ["## Failures", "", "```"] + rec["fatal"] + ["```", ""]
     md += ["<details><summary>logcat (NNAPI)</summary>", "", "```", log[-2500:], "```", "",

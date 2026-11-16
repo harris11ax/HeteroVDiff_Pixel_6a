@@ -189,11 +189,81 @@ the TPU zone is 1 °C-quantised and VIRTUAL-SKIN spikes ~3 °C for one sample ev
 Fixed: a confirm miss now re-enters the wait loop and counts against `--max-wait`. Both the
 quantisation and the VIRTUAL-SKIN transient are now recorded where the gate lives.
 
+## P3.10 — the decode now runs at the **measured** per-layer `SA`, and it costs no latency
+
+Capture `vae_seq_sa_20261116_061040` (binary rebuilt this run). P3.9 measured `max|x|/127` for all
+36 decoder layers (`phase1_quant/calibrate.py`) and found **34 of 36 need a larger activation scale
+than the nominal `1/127`** (median 5.05×, worst **32.06×** on `up_blocks.1.resnets.0.conv_shortcut`),
+i.e. every `convseq` walk so far was quantising the decode into a range it does not live in. This run
+wires the table in.
+
+**The artifact** (`phase1_quant/vae_sa.py`, verifier included): `artifacts/vae/act_scales_f32.bin`
+= **36 × f32 = 144 B**, one activation scale per layer, indexed in `vae_int8.json`'s layer order.
+Derived, not typed: names are matched element-wise against the artifact (36/36, order asserted) and
+the written bytes are re-read and compared float-for-float (worst delta **0**). Sidecar
+`vae_act_scales.json` carries both shas and a `built` stamp.
+
+**The device** reads `/data/local/tmp/vae_sa.f32` and applies, per layer `i`:
+
+| quantity | before P3.10 | now |
+|---|---|---|
+| input operand scale | `1/127` for all 36 | `SA[i]` (measured) |
+| output operand scale | `1/127` | `SA[i]` (the layer's own) |
+| bias | **zeros** in per-channel mode | **INT32 in `SA·SW` units, per output channel**: `round(bias[c]/(SA[i]·SW[c]))` |
+| output buffer requant | `g = SW[c]/SA` (**a weight scale multiplying an activation accumulator** — removed) | `g = SA[i]/SA[i+1]`, i.e. to the **consumer layer's** scale, so the wiring step stays a byte copy |
+| summary | — | `sa=table` / `sa=nominal`, `bias_clamps`, per-layer `sa`, `sa_out`, `epi_ms`, `clamp` |
+
+### Measured
+
+| quantity | value |
+|---|---|
+| layers / graphs / executes | **36 / 36**, 100 graphs, **592 / 592 executes** |
+| activation scale | **`sa=table`** — per-layer values accepted by `CONV_2D` on all 36 layers, **0 compile failures**, `pc=1`, **0 per-channel fallbacks** |
+| bias INT32 | **0 int32 clamps** (no bias exceeds the int32 range at these scales) |
+| **sum of the 592 execute walls** | **8,822.6 ms** |
+| P3.8c, same walk at `SA = 1/127` | 8,834.7 ms ⇒ **the SA wiring costs −0.14 % (no latency)** |
+| walk | 22,730.5 ms (P3.8c 22,556.0, +0.77 %) |
+| epilogue (now instrumented) | **12,027.9 ms = 52.9 % of the walk** |
+| un-attributed per-layer overhead | 1,879.9 ms (input assembly + the int32 tap accumulate) |
+| total harness overhead | **13,907.9 ms = 61.2 % of the walk** |
+| compile / wall | 18.74 s / 43.30 s |
+| thermal | start TPU **24.0** vs gate **23.6** (`battery+3`, battery 20.6) ⇒ **0.4 °C over**, end TPU **42.0** |
+
+The 0.4 °C over-gate start is **mechanism-grade**, stated not dropped; the deployable rate is still
+P3.8c's 8,834.7 ms, which this run reproduces to **0.14 %**. Two decompositions are corrected here:
+P3.8c's "epilogue 15.53 s = 64 %" was **epilogue + accumulate** (the accumulate is now counted
+separately, 1.88 s), and the epilogue itself got **3.50 s cheaper** because `g` is now one number per
+layer instead of a per-channel weight-scale division.
+
+### Independent verification (the device's own report is not evidence)
+
+Re-read from the capture and diffed against the artifact bytes: the 36 `sa=` values the device
+printed equal the table to **2.8e-07 absolute / 2.5e-06 relative** — exactly `%.6g` print precision —
+and the chain holds, `sa_out[i] == SA[i+1]` for i = 0…34 with the last layer's `sa_out == sa`.
+
+### What still saturates, and why it is not the scale wiring
+
+Saturation at the requant is now counted instead of assumed away: **17 of 36 layers saturate nothing**,
+the median layer saturates **0.63 %** of its elements, the worst **38.57 %**
+(`up_blocks.3.resnets.2.conv2`). Directionally it is the scale ratio — the 16 layers whose consumer
+range is smaller than their own average **12.05 %**, the other 20 **2.64 %** — but the correlation is
+only **r = 0.50** (`log10(SA_in/SA_out)` vs clamp fraction) and the worst layer's ratio is just
+**1.37×**, so the ratio is **not** the driver. The driver is the wiring still missing: with no residual
+add, no SiLU and no per-layer **output** range measured, the tap sum lands wherever the harness puts
+it. So: **the decode executes, and now executes in the right numeric range — it still does not
+decode.**
+
+### What this does to the cut
+
+Nothing. `T_V` = 8.8226 (this run's execute sum, −0.14 % from the table's 8.8347) + 0.0855 (Mali
+mid-block attention) = **8.908 s**, which re-solves to `k_b*` = 163 as in P3.8c. No lock touched.
+
 ## Next
 
-1. ~~**Cool re-run for a table-grade start**~~ — **done 2026-11-16 04:58:56**, capture
-   `vae_seq_cool_20261116_045856`: 8,834.7 ms of compute at a 24.0 °C start vs a 24.1 °C gate
-   (§P3.8c above).
+1. **Per-layer output scales + the residual/SiLU/clamp path** — the difference between a walk in the
+   right range (P3.10) and a decode. `calibrate.py` already records `max_abs_out`, but it reads
+   **1.0** for the early layers, so it was not a real output calibration; it needs the layer's own
+   output range, and then the table becomes 2 × 36 floats.
 2. `--decode 1` in `proc_b` can now call this same walk instead of printing the reference.
-3. Parity still needs `SA` per layer from `calibrate.py` (FP32 forward through the decoder) plus
-   the residual wiring — that is the difference between "executes" and "decodes".
+3. Gate 5, ≥10 chunks with the decode in it.
+

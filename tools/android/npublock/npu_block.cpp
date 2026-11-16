@@ -53,6 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <algorithm>
 #include <vector>
 
 static const char* W_PATH = "/data/local/tmp/hv_block_int8.bin";
@@ -666,8 +667,12 @@ static ANeuralNetworksDevice* find_tpu() {
 //   * per-output-channel FP32 scales are offered to CONV_2D as
 //     SYMM_PER_CHANNEL. FULLY_CONNECTED rejects per-channel on this HAL; whether
 //     CONV_2D accepts it is the fork this mode answers (pc = -1 probes first)
-//   * FP32 biases are quantised to INT32 in SA*SW units using the SA this run
-//     pins (VAE_SA = 1/127, DECLARED — calibrate.py does not exist yet)
+//   * FP32 biases are quantised to INT32 in SA*SW units, per output channel
+//   * the activation scale is the MEASURED per-layer one (P3.9 `calibrate.py`
+//     -> `phase1_quant/vae_sa.py` -> /data/local/tmp/vae_sa.f32). The nominal
+//     1/127 remains only as a fallback, and a run that uses it says `sa=nominal`
+//     in its summary. 34 of 36 layers need a larger scale than 1/127 (median
+//     5.05x, worst 32.06x), so a nominal walk clips and cannot be a quality claim.
 //
 // What is NOT wired here: residual adds, the resnet-shortcut addition and the
 // SiLU/clamp epilogues. They move no weights and their numerical effect depends
@@ -676,7 +681,13 @@ static const char* VAE_W_PATH   = "/data/local/tmp/vae_int8.bin";
 static const char* VAE_SC_PATH  = "/data/local/tmp/vae_scales.f32";
 static const char* VAE_BI_PATH  = "/data/local/tmp/vae_bias.f32";
 static const char* VAE_SEQ_PATH = "/data/local/tmp/vae_seq.txt";
-static const float VAE_SA = 1.0f / 127.0f;   // declared nominal activation scale
+static const char* VAE_SA_PATH  = "/data/local/tmp/vae_sa.f32";   // 36 x f32, layer order
+// The nominal is only a fallback for a table-less run. P3.9 measured the real
+// per-layer max|x|/127: 34 of 36 layers need a LARGER scale than this (median
+// 5.05x, worst 32.06x on up_blocks.1.resnets.0.conv_shortcut), i.e. 1/127 was
+// clipping the decode. phase1_quant/vae_sa.py writes the table; a run that
+// reports sa=nominal is a mechanism run, not a quality run.
+static const float VAE_SA_NOMINAL = 1.0f / 127.0f;
 
 struct SeqTap   { int tap, delta, kh, kw; long long off, bytes; };
 struct SeqLayer { std::string name; int frames, fin, cout, cin, h, w, ntaps, wiring;
@@ -727,7 +738,7 @@ static int load_seq(std::vector<SeqLayer>* out) {
 // One CONV_2D graph: [1,H,W,Cin] -> [1,H,W,Cout], SAME padding, stride 1.
 static int add_conv_op(Holder& h, ANeuralNetworksMemory* wmem, int H, int W, int Cin, int Cout,
                        int kh, int kw, long long woff, const float* sc, int pc,
-                       const int32_t* bias, uint32_t in, uint32_t* out, const char** why) {
+                       const int32_t* bias, float sa, uint32_t in, uint32_t* out, const char** why) {
     const uint32_t dF[4] = {(uint32_t)Cout, (uint32_t)kh, (uint32_t)kw, (uint32_t)Cin};
     const uint32_t dB[1] = {(uint32_t)Cout};
     const uint32_t dO[4] = {1u, (uint32_t)H, (uint32_t)W, (uint32_t)Cout};
@@ -736,8 +747,11 @@ static int add_conv_op(Holder& h, ANeuralNetworksMemory* wmem, int H, int W, int
     ANeuralNetworksOperandType tF = {pc ? ANEURALNETWORKS_TENSOR_QUANT8_SYMM_PER_CHANNEL
                                         : ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED,
                                      4, dF, pc ? 0.0f : sw, 0};
-    ANeuralNetworksOperandType tB = {ANEURALNETWORKS_TENSOR_INT32, 1, dB, VAE_SA * sw, 0};
-    ANeuralNetworksOperandType tO = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dO, VAE_SA, 0};
+    // Bias is INT32 in SA*SW units. For a per-channel filter NNAPI derives the
+    // per-channel bias scales from the input scale and the filter scales, so the
+    // values must be scaled per output channel (sc[c]), not by sc[0].
+    ANeuralNetworksOperandType tB = {ANEURALNETWORKS_TENSOR_INT32, 1, dB, sa * sw, 0};
+    ANeuralNetworksOperandType tO = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dO, sa, 0};
     ANeuralNetworksOperandType tS = {ANEURALNETWORKS_INT32, 0, nullptr, 0.0f, 0};
 
     uint32_t iF, iB, ipl, ipr, ipt, ipb, isw, ish, iact, io;
@@ -789,11 +803,12 @@ static int probe_conv_pc(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem
     std::vector<float> sc((size_t)Cout, 1.0f / 128.0f);
     std::vector<int32_t> bi((size_t)Cout, 0);
     const uint32_t dI[4] = {1u, (uint32_t)H, (uint32_t)W, (uint32_t)Cin};
-    ANeuralNetworksOperandType tI = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dI, VAE_SA, 0};
+    ANeuralNetworksOperandType tI = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dI,
+                                     VAE_SA_NOMINAL, 0};
     uint32_t ia, io;
     int rc = add_operand(h, &tI, &ia, &why);
     if (!rc) rc = add_conv_op(h, wmem, H, W, Cin, Cout, 3, 3, 0, sc.data(), 1, bi.data(),
-                              ia, &io, &why);
+                              VAE_SA_NOMINAL, ia, &io, &why);
     if (!rc) { uint32_t ins[1] = {ia}, outs[1] = {io};
                ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs); }
     const int arc = rc;
@@ -833,6 +848,32 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
     const float* BI = (const float*)biraw.data();
     const size_t nsc = scraw.size() / 4, nbi = biraw.size() / 4;
 
+    // Per-layer activation scale (phase1_quant/vae_sa.py). Absent or the wrong
+    // length is not fatal: the run degrades to the nominal and SAYS SO in the
+    // summary, because a nominal run answers execution/latency, not quality.
+    std::vector<uint8_t> saraw;
+    { FILE* f = fopen(VAE_SA_PATH, "rb");
+      if (f) { fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+               if (n > 0) { saraw.resize((size_t)n);
+                            if (fread(saraw.data(), 1, (size_t)n, f) != (size_t)n) saraw.clear(); }
+               fclose(f); } }
+    std::vector<float> SA;
+    if (!saraw.empty() && saraw.size() % 4 == 0) {
+        const size_t n = saraw.size() / 4;
+        const float* p = (const float*)saraw.data();
+        for (size_t i = 0; i < n; ++i) SA.push_back(p[i]);
+        if ((int)n != (int)plan.size()) {
+            P("NOTE|convseq_sa_length_mismatch|table=%zu|layers=%zu|using_nominal", n, plan.size());
+            SA.clear();
+        }
+    }
+    const bool sa_table = !SA.empty();
+    if (!sa_table) P("NOTE|convseq_sa=nominal|%.8g|no_table_at_%s", (double)VAE_SA_NOMINAL, VAE_SA_PATH);
+    else P("NOTE|convseq_sa=table|layers=%zu|min=%.8g|max=%.8g", SA.size(),
+           (double)*std::min_element(SA.begin(), SA.end()),
+           (double)*std::max_element(SA.begin(), SA.end()));
+    int64_t bias_clamps = 0;
+
     if (pcmode < 0) {
         pcmode = probe_conv_pc(tpu, wmem);
         P("NOTE|convseq_pc_mode=%d|1=SYMM_PER_CHANNEL_accepted|0=per_tensor_fallback", pcmode);
@@ -860,6 +901,12 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
         }
         const float* lsc = SC + L.sc_off;
         const float* lbi = BI + L.sc_off;
+
+        // This layer's activation scale (its INPUT tensor), and the scale its
+        // OUTPUT buffer must carry — the consumer's input scale, so that the
+        // wiring step stays a pure byte copy/permute.
+        const float sa_in  = sa_table ? SA[(size_t)li] : VAE_SA_NOMINAL;
+        const float sa_out = (sa_table && li + 1 < nlay) ? SA[(size_t)li + 1] : sa_in;
 
         // ---- build this layer's input frames from the previous output
         std::vector<int8_t> inb((size_t)L.fin * plane_in, 0);
@@ -930,17 +977,23 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
                 if (ANeuralNetworksModel_create(&h.m)) { ok = false; break; }
                 const uint32_t dI[4] = {1u, (uint32_t)L.h, (uint32_t)L.w, (uint32_t)L.cin};
                 ANeuralNetworksOperandType tI = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED,
-                                                 4, dI, VAE_SA, 0};
+                                                 4, dI, sa_in, 0};
                 std::vector<int32_t> bi((size_t)L.cout, 0);
-                if (!use_pc) {   // real bias only in per-tensor mode (bias units need SW)
-                    for (int c = 0; c < L.cout; ++c) {
-                        const double den = (double)VAE_SA * (double)lsc[0];
-                        bi[c] = (int32_t)((double)lbi[c] / den);
-                    }
+                // Bias -> INT32 in SA*SW units, per output channel (the filter
+                // scale for that channel, whether or not the op takes
+                // per-channel). A bias larger than the int32 range at this SA
+                // is counted, not hidden.
+                for (int c = 0; c < L.cout; ++c) {
+                    const double den = (double)sa_in * (double)lsc[c];
+                    if (!(den > 0.0)) continue;
+                    const double v = (double)lbi[c] / den;
+                    if (v > 2147483000.0 || v < -2147483000.0) { bias_clamps++; }
+                    bi[c] = (int32_t)(v > 2147483000.0 ? 2147483000.0
+                                     : (v < -2147483000.0 ? -2147483000.0 : v));
                 }
                 if (add_operand(h, &tI, &ia, &why) ||
                     add_conv_op(h, wmem, L.h, L.w, L.cin, L.cout, T.kh, T.kw, T.off,
-                                lsc, use_pc, bi.data(), ia, &io, &why)) { ok = false; break; }
+                                lsc, use_pc, bi.data(), sa_in, ia, &io, &why)) { ok = false; break; }
                 uint32_t ins[1] = {ia}, outs[1] = {io};
                 ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs);
                 int frc = ANeuralNetworksModel_finish(h.m);
@@ -984,7 +1037,7 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
         std::vector<int32_t> acc(plane_out, 0);
         std::vector<int8_t> inp(plane_in, 0), zero(plane_in, 0), opb(plane_out, 0);
         int64_t lay0 = now_ns();
-        int64_t layexec = 0;
+        int64_t layexec = 0, layepi = 0, layclamp = 0;
         for (int f = 0; f < L.frames; ++f) {
             std::fill(acc.begin(), acc.end(), 0);
             for (size_t ti = 0; ti < L.taps.size(); ++ti) {
@@ -1009,28 +1062,39 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
                 execs++; layexec++;
                 for (size_t i = 0; i < plane_out; ++i) acc[i] += (int32_t)opb[i];
             }
-            // epilogue: dequant with the output channel's weight scale, requant to VAE_SA
+            // epilogue: accumulate the per-tap INT8 outputs — each is already at
+            // THIS layer's SA, with the weight scale folded in by the HAL — and
+            // requantise to the CONSUMER layer's SA, so the next wiring step is a
+            // pure byte copy. The pre-P3.10 line here was `g = lsc[c]/VAE_SA`,
+            // i.e. it multiplied an *activation* accumulator by a *weight* scale;
+            // measured 2026-11-16 and removed, with saturation counted instead of
+            // assumed away.
             int8_t* dst = &outb[(size_t)f * plane_out];   // HWC, same as the NNAPI tensor
             const size_t plane = (size_t)L.h * L.w;
+            const double g = (double)sa_in / (double)sa_out;
+            const int64_t e0 = now_ns();
             for (int c = 0; c < L.cout; ++c) {
-                const double g = (double)lsc[use_pc ? c : 0] / (double)VAE_SA;
                 for (size_t i = 0; i < plane; ++i) {
                     const int32_t a = acc[i * (size_t)L.cout + (size_t)c];
                     long v = (long)((double)a * g + (a >= 0 ? 0.5 : -0.5));
-                    if (v > 127) v = 127;
-                    if (v < -127) v = -127;
+                    if (v > 127) { v = 127; layclamp++; }
+                    if (v < -127) { v = -127; layclamp++; }
                     dst[i * (size_t)L.cout + (size_t)c] = (int8_t)v;
                 }
             }
+            layepi += now_ns() - e0;
         }
         const double layms = (now_ns() - lay0) / 1e6;
         int64_t lmacs = 0;
         for (auto& T : L.taps)
             lmacs += (int64_t)L.h * L.w * L.cout * L.cin * T.kh * T.kw * (int64_t)L.frames;
         macs += lmacs;
-        P("CSLAYER|layer=%d|%s|frames=%d|taps=%zu|executes=%lld|ms=%.1f|macs=%lld|gops=%.1f|pc=%d",
+        P("CSLAYER|layer=%d|%s|frames=%d|taps=%zu|executes=%lld|ms=%.1f|macs=%lld|gops=%.1f|pc=%d|"
+          "sa=%.6g|sa_out=%.6g|epi_ms=%.1f|clamp=%.4f",
           li, L.name.c_str(), L.frames, L.taps.size(), (long long)layexec, layms,
-          (long long)lmacs, 2.0 * (double)lmacs / (layms / 1000.0) / 1e9, use_pc);
+          (long long)lmacs, 2.0 * (double)lmacs / (layms / 1000.0) / 1e9, use_pc,
+          (double)sa_in, (double)sa_out, layepi / 1e6,
+          (double)layclamp / (double)((int64_t)L.frames * (int64_t)plane_out));
 
         for (auto* c : comps) ANeuralNetworksCompilation_free(c);
         for (auto& h : holders) { if (h.m) { ANeuralNetworksModel_free(h.m); h.m = nullptr; } }
@@ -1041,10 +1105,11 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
 
     const double total_s = (now_ns() - run0) / 1e9;
     P("SUMMARY|mode=convseq|layers=%d|executes=%lld|compile_s=%.2f|warm_s=%.3f|wall_s=%.3f|"
-      "macs=%lld|gops=%.1f|pc=%d|pc_fallbacks=%lld|tap_failures=%lld",
+      "macs=%lld|gops=%.1f|pc=%d|pc_fallbacks=%lld|tap_failures=%lld|sa=%s|bias_clamps=%lld",
       nlay, (long long)execs, compile_ns / 1e9, total_s - compile_ns / 1e9, total_s,
       (long long)macs, 2.0 * (double)macs / total_s / 1e9, pcmode,
-      (long long)pcfb, (long long)tapfails);
+      (long long)pcfb, (long long)tapfails, sa_table ? "table" : "nominal",
+      (long long)bias_clamps);
     P("DONE");
     return 0;
 }
