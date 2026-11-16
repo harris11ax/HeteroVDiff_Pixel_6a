@@ -4,7 +4,7 @@
   "B": 180,
   "T_G": 0.1474,
   "T_N": 0.6484,
-  "T_V": 10.554,
+  "T_V": 10.64,
   "units": "s per block (T_G, T_N); s per chunk (T_V)",
   "provenance": {
     "T_G": {
@@ -23,19 +23,21 @@
       "solo_alt_s": 0.6758
     },
     "T_V": {
-      "value_s": 10.554,
-      "kind": "lower bound: 36 causal convs as CONV_2D taps, gate-compliant start",
-      "capture": "docs/device/conv_sweep_20261115_182512.json",
-      "detail": "mid-block 3-D attention (32.4 GMAC) has no measured rate on either engine",
-      "mali_alt_s": 12.256
+      "value_s": 10.64,
+      "kind": "measured, hybrid: 36 causal convs as CONV_2D taps on the Edge TPU + the mid-block 3-D attention on Mali (one OpenCL dispatch per GEMM)",
+      "capture": "docs/device/conv_sweep_20261115_182512.json (convs 10.554) + docs/device/attn_tv_20261115_211944.md (attention 0.0855 Mali / 0.601 TPU)",
+      "detail": "attention is 2x[6120,6120,384] (QK^T, AV) + 4x[6120,384,384] = 32.38 GMAC; Mali 36.071 + 4x3.337 ms, TPU 0.601 s => Mali 7.0x, so the hybrid is the fastest decode and the configuration the cut assumes. N padded 6120 -> 6144 for the Mali tiled kernel.",
+      "all_tpu_alt_s": 11.155,
+      "all_mali_alt_s": 12.342,
+      "attention_s": {"mali": 0.0855, "tpu": 0.601, "gmac": 32.38}
     }
   },
   "cut": {
     "solver": "phase2_profile/solve_cut.py",
     "k_b_opt": 160,
-    "k_continuous": 159.92,
-    "period_s": 23.58,
-    "speedup_vs_npu_only": 5.396,
-    "note": "interior crossing, nearly balanced (GPU stage 23.58 s, NPU stage 23.52 s, idle 0.06 s); k_b=158 with the conservative solo pair, 162 with the Mali decode"
+    "k_continuous": 160.03,
+    "period_s": 23.61,
+    "speedup_vs_npu_only": 5.394,
+    "note": "interior crossing, nearly balanced (GPU stage 23.58 s, NPU stage 23.61 s, idle 0.02 s) with the hybrid decode (T_V = 10.640). k_b=158 with the conservative solo pair, 161 all-TPU decode, 162 all-Mali decode — the locked 160 survives exactly when the mid-block attention runs on Mali."
   }
 }
