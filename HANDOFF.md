@@ -1,8 +1,9 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (04:40, **P3.8b — the VAE decode executes: 36/36 layers, 592/592 `CONV_2D`
-dispatches on the real INT8 artifact, 9.07 s of compute, and `CONV_2D` accepts the per-channel
-scales the FC stage rejects**). This
+*Updated 2026-11-16 (05:05, **P3.8c — the VAE decode at a table-grade start: 592/592 `CONV_2D`
+executes in 8,834.7 ms (0.837× the plan's per-op sum) from a 24.0 °C start against a 24.1 °C gate,
+and the decode's `CONV_2D` class carries its own temperature term (+1.7 % median, +5.2 % worst,
+identical shapes early→late) that the FC stage does not**). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
 `docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
@@ -30,7 +31,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | Gate 2 (zero-copy) | **pass** on both routes; file-mmap route B preferred |
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
-| **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound |
+| **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound. The decode now also **executes** end-to-end off the INT8 artifact: **8,834.7 ms** of conv compute, 592/592 dispatches, table-grade start → `docs/device/RESULTS_vae_convseq.md` §P3.8c |
 | Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg — no longer environment-blocked: `.venv-ref` (torch 2.15.0+cpu, diffusers 0.43.0) is installed, commit `8663c3f`** |
 | **Gate 3 (parity)** | **measured, FAILS as configured — but LOCALIZED and a passing recipe exists** → `docs/device/RESULTS_gate3_parity.md` + `docs/device/RESULTS_gate3_bisect.md`, tools `tools/pipe/gate3_parity.py`, `tools/pipe/gate3_bisect.py`, `proc_b --dump-parity/--probe-dir/--act`. The break is the **M (row) direction**: `N = 384` graphs are **100.00 % bit-exact (Δ = 0, 0 elements off by ≥2)** at `M = 1/8/128/160/192/200`, `N = 768` at `M = 128`, `N = 1536` at `M = 1`, on both `attn1.to_q` and `ffn.up`; the same 384-column graph at `M = 384` **will not compile** (`OP_FAILED`, ~58 ms). Wide graphs at `M = 256…384` return 25.8–50.7 %. So the fix Gate 3 proposed ("one graph per 384-column block") is the exact graph this compiler refuses, and the exact recipe is `N ∈ {128,384,768}` × `M ≤ 200` = **112 executes/block** instead of 9 at 384 tokens (**448 executes / 56 compilations at the stage's 1536 tokens; cost now measured in P3.7c**) |
 | Gates 4–5 | Gate 4 PASS (memory + one copy) |
@@ -415,11 +416,31 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  The wiring is derived+asserted for all 36 layers (3→5→9 frames, 34×60→272×480): the shape chain
  closes. Trap: manifest scale offsets are **BYTES** (÷4), caught by an assertion.
  **NEXT ACTION (device, one bounded run): the cool re-run for a table-grade start** —
- `python tools/npu/cool_rerun.py --cmd "python tools/npu/vae_seq.py --run --out vae_seq_cool"`
- (launched 04:4x, marker `docs/device/.measurement_in_flight`). **Then the host-only work:**
- Gate 1's FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg and `calibrate.py` (which is also what turns
- "executes" into "decodes": it is the only source of `SA`), then Gate 5 (≥10 chunks with the
- decode in it, `--decode 1` should call `convseq` instead of printing the reference).
+ **DONE 05:0x, see P3.8c below**.
+ **P3.8c DONE 2026-11-16 04:58:56 — the decode is priced at a table-grade start, and its `CONV_2D`
+ class has a temperature term the FC stage does not** → `docs/device/RESULTS_vae_convseq.md` §P3.8c,
+ capture `vae_seq_cool_20261116_045856`. **Start peak 24.0 °C against a `battery+3` of 24.1 °C**
+ (battery cold at 21.1) ⇒ table-grade on the strict zero-slack rule, the 0.9 °C P3.8b missed.
+ **592/592 executes, 8,834.7 ms of compute** (−2.5 % vs P3.8b's 9,065.3) = **0.837× the plan's
+ 10,554.4 ms** per-op sum, **579 GMAC/s = 1,158 GOPS** at 2 ops/MAC (the P3.8b table's 1,129 is the
+ same number in that convention — the artifact's `gops` field is MAC/s, hence an apparent 2×).
+ Walk 24.365 s, compile 18.64 s (186 ms/graph), and **the harness's own epilogue is still 15.53 s =
+ 64 % of the walk**. Per-plane exec/plan: 1.285 / 0.957 / 0.774 / 0.825 (34×60 → 272×480), agreeing
+ with P3.8b within 6 % per plane ⇒ the per-layer structure is the shapes', not the thermal start.
+ **NEW: four identical-shape layer pairs, early vs late in one walk (TPU 24 → 41 °C) read 0.992 /
+ 1.015 / 1.018 / 1.052** — median **+1.7 %**, worst **+5.2 %** on the largest plane 15.3 s apart,
+ a monotonic rise the FC stage does not show (+0.35 % over 24.6 s) ⇒ **quote a decode time with its
+ start temperature**. Cut consequence, reported not applied: `T_V` = 8.8347 + 0.0855 (Mali attn)
+ = **8.920 s** re-solves to `k_b*` **163 / 24.06 s** vs 165 / 24.32 s on the plan's `T_V` — a 16 %
+ cheaper decode moves the cut 2 blocks and 1.1 %, so the cut is insensitive to it; lock untouched.
+ Defect fixed: `cool_rerun.py` returned 3 on a single failed confirm sample (it threw away 17 min of
+ cooling at 04:39 on a 1 °C-quantised TPU zone) and now re-enters the wait loop, as P3.7e claimed.
+  **NEXT ACTION (host-only, needs no phone): Gate 1's FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg —
+ it needs the reference decode path wired in `.venv-ref` (torch 2.15.0+cpu, diffusers 0.43.0; measured
+ 449.9 GFLOPS ⇒ one 10.2 TFLOP decode pass ≈ 23 s) and the INT8 numbers applied as
+ quantise-dequantise weights, so the same code path yields both sides. Then `calibrate.py` (the only
+ source of `SA`, which is what turns "executes" into "decodes"), then wire `proc_b --decode 1` to call
+ `convseq` instead of printing the reference, then Gate 5 (≥10 chunks with the decode in it).**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
