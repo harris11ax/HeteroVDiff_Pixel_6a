@@ -83,9 +83,28 @@ struct SlotHdr {           // 64 B, one per slot
   chain unmatchable; a one-tile buffer indexed `tiles×TILE` segfaults the consumer and
   reads as `prod_slot_never_freed`. Thermal: `skip` started 0.2 °C over the floor gate,
   `stage` 4.1 °C over (not table-grade — comparison only).
-- **P3.4 — coordinator.** `stream.py`: thermal gate → push → launch both with
+- ~~**P3.4 — coordinator.** `stream.py`: thermal gate → push → launch both with
   `setsid`, one `adb shell`, collect `TS|` lines, compute per-chunk period, publish→
-  consume latency, GPU/NPU busy times, and the overlap fraction. Prove **2 chunks**.
+  consume latency, GPU/NPU busy times, and the overlap fraction. Prove **2 chunks**.~~
+  — **done 2026-11-15 23:1x** → `docs/device/RESULTS_stream_p34.md`, captures
+  `stream_20261115_231417` (4 chunks × 1 NPU block) and `stream_20261115_231451`
+  (2 chunks × 20 = the cut's real stage). Both **PASS**: 4/4 and 2/2 chunks
+  published/consumed, 144/144 and 1440/1440 executes, 10/10 zero-copy imports,
+  no fatal. Launch order is a **correctness rule**: both binaries
+  `reset_headers()` on map, so the consumer must reach `READY` before the
+  producer starts (otherwise a publish is wiped and the run hangs 300 s later as
+  `chunk_never_published`); that ordering gives a first-chunk handoff of
+  **0.244 µs**. Measured: GPU block **187.2 ms** median (10 closures) / **168.0**
+  (one closure), NPU block **385.9 ms**, overlap **39.4 % of NPU busy**
+  (70.5 % of GPU busy) at 1 block/chunk. Two findings, both P3.5 prerequisites:
+  (a) `proc_a` publishes **per block**, the cut hands off once per `k_b` = 160
+  blocks → the GPU finished 2×20-block chunks in 0.214 s and idled 18.4 s
+  (overlap 1.1 %); needs `--pub-every N`. (b) The P3.3 harness hashes `ffn.up`'s
+  13,762,560 B output **every block** (byte-at-a-time FNV) → a reproducible
+  **~80 ms gap between blocks**, 1.62 s per 20-block chunk (**17 %** of the
+  stage), 12.8 s at 160 blocks/chunk; sample it before quoting any period.
+  Both captures start 1.8 °C / 3.7 °C over the gate (back-to-back runs) —
+  mechanism-grade, not table-grade; re-run under `cool_rerun.py` for rates.
 - **P3.5 — 10 chunks.** Steady-state period vs the 23.61 s prediction; per-chunk
   drift table (the same first-20 %/last-20 % method as the sustained soak).
 - **P3.6 — Gate 4.** `dumpsys meminfo` PSS for both PIDs, and `/proc/<pid>/maps`

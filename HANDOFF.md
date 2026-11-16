@@ -178,12 +178,27 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    first chunk 0.163 µs, later chunks **queue** (consumer mid-block: 391–710 ms) — that is
    back-pressure, not handoff cost. Thermal: `skip` started 0.2 °C (pre-fix) and 1.0 °C
    over the floor gate (floor-grade, stated), `stage` 4.1 °C over (comparison only, not table-grade).
-   **NEXT TICK: P3.4 — `phase3_pipeline/stream.py`**, the coordinator: thermal gate → push →
-   launch `proc_a` and `proc_b` in the same `adb shell` with `setsid`, collect both `TS|` streams,
-   compute per-chunk period, publish→consume, GPU/NPU busy and the overlap fraction. Prove
-   **2 chunks** first. Launch shape: `proc_b --source none` with `proc_a` as the producer (the
-   `fork` producer is for standalone unit tests only), and `--nblocks` = `180 - k` from
-   `configs/rates_preset_a.json`.
+   **P3.4 DONE 2026-11-15 23:1x** → `docs/device/RESULTS_stream_p34.md`, tool
+   `phase3_pipeline/stream.py`, captures `stream_20261115_231417` (4 chunks × 1 block) and
+   `stream_20261115_231451` (2 chunks × 20 blocks = the cut's real stage). Both PASS:
+   4/4 and 2/2 published→consumed, 144/144 and 1440/1440 executes, 10/10 zero-copy imports,
+   no fatal. **Launch order is a correctness rule**: both binaries `reset_headers()` on map,
+   so the consumer must hit `READY` before the producer starts, else a publish is wiped and
+   the run hangs 300 s later as `chunk_never_published`; ordered that way the first handoff is
+   **0.244 µs**. GPU block **187.2 ms** (10 closures) / **168.0 ms** (one closure), NPU block
+   **385.9 ms**, overlap **39.4 % of NPU busy**. Two findings now block P3.5:
+   (a) **`proc_a` publishes per block, the cut hands off once per 160** — GPU finished
+   2×20-block chunks in 0.214 s and idled 18.4 s (overlap 1.1 %); needs `--pub-every N`.
+   (b) the P3.3 harness FNV-hashes `ffn.up`'s 13,762,560 B output **every block** →
+   reproducible **~80 ms dead gap between blocks** = 1.62 s per 20-block chunk (**17 %**),
+   12.8 s at 160 blocks/chunk; sample the hash before quoting a period. Both captures start
+   1.8 / 3.7 °C over the gate (back-to-back) → mechanism-grade, rates need `cool_rerun.py`.
+   **NEXT TICK: P3.5 pre-work, host + one bounded device run.** (1) add `--pub-every N` to
+   `tools/android/pipe/proc_a.cpp` and a strided `--hash-every` to `proc_b.cpp`, rebuild with
+   `tools/android/pipe/build.sh`; (2) re-run `stream.py --chunks 2 --nblocks 20 --pub-every 160`
+   … the GPU stage then costs 160 × 168 ms = 26.9 s per chunk, so keep it to 2 chunks and
+   launch it under `tools/npu/cool_rerun.py` for a table-grade start; (3) only then P3.5's
+   10 chunks vs the 23.61 s prediction. Nothing else is on the critical path.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
