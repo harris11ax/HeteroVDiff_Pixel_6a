@@ -1,6 +1,11 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (05:50, **P3.9 — `SA` is now measured, not declared: 1800 DiT scales
+*Updated 2026-11-16 (06:10, **P3.10 — the measured per-layer activation scale is wired into the
+device: `convseq` now runs all 36 layers at their own `SA` (was `1/127` for every one), with real
+INT32 per-channel bias and the requant to the *consumer* layer's scale. 592/592 executes,
+`sa=table` accepted on 36/36, and the wiring costs **−0.14 %** (8,822.6 vs 8,834.7 ms) — so it is
+free. Saturation is counted now: 17/36 layers none, median 0.63 %, worst 38.57 %, and it is not the
+scale ratio (r = 0.50) but the still-missing residual/SiLU path.** Before that, **P3.9 — `SA` is now measured, not declared: 1800 DiT scales
 (6 locked timesteps × 30 blocks × 10 GEMMs) + 36 VAE layer scales, and with **both operands INT8**
 the decoder still PASSes Gate 1 at **38.73 dB / 0.9672** against 40.22 dB weight-only ⇒ the
 activation path costs **1.48 dB** (`phase1_quant/calibrate.py`,
@@ -38,7 +43,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | Gate 2 (zero-copy) | **pass** on both routes; file-mmap route B preferred |
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
-| **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound. The decode now also **executes** end-to-end off the INT8 artifact: **8,834.7 ms** of conv compute, 592/592 dispatches, table-grade start → `docs/device/RESULTS_vae_convseq.md` §P3.8c |
+| **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound. The decode now also **executes** end-to-end off the INT8 artifact: **8,834.7 ms** of conv compute, 592/592 dispatches, table-grade start → `docs/device/RESULTS_vae_convseq.md` §P3.8c. **P3.10 (06:10) then wired the measured per-layer `SA` in: 592/592 at `sa=table`, sum of execute walls 8,822.6 ms (−0.14 % ⇒ free), saturation counted (17/36 layers zero, worst 38.57 %)** → §P3.10 |
 | Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **End-to-end PSNR/SSIM leg now PASS** (2026-11-16 05:10, `phase1_quant/psnr_gate1.py`, capture `gate1_psnr_20261116_051022`): **40.22 dB / SSIM 0.9708** with all 36 decoder layers rebuilt from the INT8 artifact vs the fp32 reference (bar 28 dB / 0.92), 36/36 reconstructions reproduce the manifest's `rel_fro` to 4.5e-07; leaving the two 0.9974-cosine `time_conv` layers fp32 recovers **48.99 dB / 0.9962** ⇒ those two layers are the whole cost. **Weight-only** — and now also measured **with the INT8 activation operand** at the calibrated per-layer `SA`: **38.73 dB / 0.9672 PASS**, i.e. the activation half costs 1.48 dB / 0.0036 SSIM → `docs/device/RESULTS_gate1_actquant.md`, capture `gate1_psnr_20261116_054851` |
 | **Gate 3 (parity)** | **measured, FAILS as configured — but LOCALIZED and a passing recipe exists** → `docs/device/RESULTS_gate3_parity.md` + `docs/device/RESULTS_gate3_bisect.md`, tools `tools/pipe/gate3_parity.py`, `tools/pipe/gate3_bisect.py`, `proc_b --dump-parity/--probe-dir/--act`. The break is the **M (row) direction**: `N = 384` graphs are **100.00 % bit-exact (Δ = 0, 0 elements off by ≥2)** at `M = 1/8/128/160/192/200`, `N = 768` at `M = 128`, `N = 1536` at `M = 1`, on both `attn1.to_q` and `ffn.up`; the same 384-column graph at `M = 384` **will not compile** (`OP_FAILED`, ~58 ms). Wide graphs at `M = 256…384` return 25.8–50.7 %. So the fix Gate 3 proposed ("one graph per 384-column block") is the exact graph this compiler refuses, and the exact recipe is `N ∈ {128,384,768}` × `M ≤ 200` = **112 executes/block** instead of 9 at 384 tokens (**448 executes / 56 compilations at the stage's 1536 tokens; cost now measured in P3.7c**) |
 | Gates 4–5 | Gate 4 PASS (memory + one copy) |
@@ -473,10 +478,33 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  **38.73 dB / SSIM 0.9672 PASS** vs weight-only **40.22 dB / 0.9708** (reproduced to 2 dp ⇒ the leg
  is deterministic): the activation operand costs **1.48 dB / 0.0036 SSIM**, concentrated on the
  frames with the most headroom (f0 −9.47 dB, steady-state f4–f8 −0.34…−1.23 dB). No device rate
- touched; `T_N`/`T_G`/`T_V`/`k_b*` unchanged. **NEXT ACTION: (a) wire `SA` into the device — the
- per-layer table + INT32 bias in `SA*SW` units (it is FP32 and flagged `quantised: false` for
- exactly this reason) so `convseq` stops using `1/127`; (b) `proc_b --decode 1` calls `convseq`
- instead of printing 10.640 s; (c) Gate 5, ≥10 chunks with the decode in it.**
+ touched; `T_N`/`T_G`/`T_V`/`k_b*` unchanged. **NEXT ACTION: (a) wire `SA` into the device — **DONE 06:10, see P3.10 below**; (b) `proc_b --decode 1` calls `convseq` instead of printing 10.640 s; (c) Gate 5, ≥10 chunks with the decode in it.**
+ **P3.10 DONE 2026-11-16 06:10 — the per-layer `SA` is wired into the device, and it costs no latency**
+ → `docs/device/RESULTS_vae_convseq.md` §P3.10, capture `vae_seq_sa_20261116_061040`, tools
+ `phase1_quant/vae_sa.py` + `npu_block convseq`. The artifact is now
+ **`artifacts/vae/act_scales_f32.bin` = 36 × f32 = 144 B**, derived from the newest vae calibration
+ and verified float-for-float against the source (delta 0), in `vae_int8.json`'s layer order.
+ `convseq` reads `/data/local/tmp/vae_sa.f32` and applies per layer: input AND output operand scale
+ = `SA[i]` (was 1/127 for all 36), bias as **real INT32 in `SA·SW` units per output channel** (was
+ zeros in per-channel mode; 0 int32 clamps), and the output requant `g = SA[i]/SA[i+1]` — to the
+ **consumer** layer, so the byte-copy wiring stays a copy, replacing the old `g = SW[c]/SA` that
+ multiplied an activation accumulator by a weight scale. Measured: 36/36 layers, 100 graphs,
+ **592/592 executes**, `sa=table` accepted on all 36, `pc=1` 0 fallbacks, compile 18.74 s, wall
+ 43.30 s, start TPU 24.0 vs gate 23.6 (**0.4 °C over — mechanism-grade, stated**). **Sum of the 592
+ execute walls 8,822.6 ms vs P3.8c's 8,834.7 at 1/127 ⇒ the SA wiring costs −0.14 %, i.e. nothing**,
+ and the table is verified on the device (36 `sa=` values equal the bytes to 2.8e-07 abs = print
+ precision; `sa_out[i] == SA[i+1]` for all 35 links). The epilogue is now instrumented:
+ **12,027.9 ms = 52.9 % of the 22,730.5 ms walk** + 1,879.9 ms accumulate/input assembly = 61.2 %
+ harness overhead, so P3.8c's "15.53 s epilogue" was epilogue **+ accumulate** and the epilogue
+ itself is 3.50 s cheaper now. Saturation is counted, not hidden: **17/36 layers saturate nothing,
+ median 0.63 %, worst 38.57 %** (`up_blocks.3.resnets.2.conv2`); `corr(log10(SA_in/SA_out), clamp) =
+ 0.50` ⇒ the scale ratio is **not** the driver, the missing residual/SiLU wiring and an unmeasured
+ per-layer **output** range are. `T_V` unchanged (8.8226 + 0.0855 = 8.908 s, `k_b*` = 163), no lock
+ touched, **no quality claim: it executes in the right numeric range, it still does not decode.**
+ **NEXT ACTION: (a) `calibrate.py` must record the per-layer OUTPUT range (its `max_abs_out` reads a
+ flat 1.0, so it was never a real output calibration) → table becomes 2 × 36 floats, and wire the
+ residual/SiLU/clamp path — that is what turns "executes" into "decodes"; (b) `proc_b --decode 1`
+ calls `convseq` instead of printing 10.640 s; (c) Gate 5, ≥10 chunks with the decode in it.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
