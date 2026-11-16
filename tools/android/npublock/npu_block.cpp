@@ -476,6 +476,11 @@ static int run_downsep(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
             }
             int64_t t1 = now_ns();
             tile_ms.push_back((t1 - t0) / 1e6);
+            // Absolute CLOCK_MONOTONIC stamps, every tile of every iteration: the
+            // co-run driver classifies each tile as "ran alone" vs "ran while the
+            // GPU was busy" from these, instead of inferring it from the arm.
+            P("TS|downsep|tile=%d|iter=%d|t0=%.3f|t1=%.3f|ms=%.3f", t, it,
+              (double)t0 / 1e6, (double)t1 / 1e6, (t1 - t0) / 1e6);
             if (it == 0)
                 P("TILE|downsep|tile=%d|ms=%.3f|out0=%d", t, (t1 - t0) / 1e6, (int)prev[0]);
         }
@@ -721,6 +726,13 @@ int main(int argc, char** argv) {
         nchunks = (strcmp(mode, "downsep") == 0) ? 7 : atoi(mode + 4);
         if (nchunks != 2 && nchunks != 4 && nchunks != 7) {
             P("FATAL|bad_chunk_count|%s|want=down2|down4|downsep", mode); P("DONE"); return 2; }
+        // G_PC defaults to 1 and FULLY_CONNECTED rejects per-channel scales at
+        // addOperation (BAD_DATA) before it ever compiles — the same trap `attn` closed
+        // below. The 0.2580 s downsep reference (RESULTS_npu_tn.md §4) is per-tensor.
+        if (strcmp(mode, "downsep") == 0 && G_PC) {
+            G_PC = 0;
+            P("NOTE|mode=downsep|pc=0|per_tensor|per_channel_rejected_by_FULLY_CONNECTED");
+        }
         if (ensure_down_blob(nchunks, &wpath, &why)) { P("FATAL|down_weights|%s", why); P("DONE"); return 2; }
         wbytes = (int64_t)DOWN_N * (int64_t)DOWN_K;
     } else if (strcmp(mode, "attn") == 0) {

@@ -1,7 +1,7 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (03:14, **P3.7h/P3.7i — the network costs nothing, the "11 %" is a reboot, the
-execution order costs nothing, and the block time depends on its *start* temperature**). This
+*Updated 2026-11-16 (03:47, **P3.7j — `ffn.down` under contention: the last solo term in `T_N` is
+not contended either, so `T_N` is co-run end to end**). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
 `docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
@@ -356,11 +356,29 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  651.2 @ 31.0, 649.5 @ 32.0 = **1.8 % across 7 °C (+0.15 %/°C)**, versus **+0.16 % within** a run
  (P3.7f) — the start sets the regime, the run does not drift. k_b* = 165 at both ends (0.8974 / 0.9095
  s), lock untouched. **Quote a block time with its start temperature.**
- **NEXT ACTION: (a) `ffn.down` under contention** — the 0.2580 s downsep is the **last solo term** in
- the exact `T_N`, and `co_recipe_device.sh` runs `--down skip`, so this needs a downsep arm in the
- co-run harness plus a contended reference; (b) then the real Phase-3 remainder: `--decode 1` is still
- a no-op stub, Gate 1's PSNR/SSIM leg and `calibrate.py` are host-only work, and Gate 5 (the
- ≥10-chunk end-to-end run) is unrun.**
+ **NEXT ACTION: (a) `ffn.down` under contention** — **DONE 03:47, see P3.7j below**; (b) then the
+ real Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's PSNR/SSIM leg and
+ `calibrate.py` are host-only work, and Gate 5 (the ≥10-chunk end-to-end run) is unrun.**
+ **P3.7j DONE 03:47 — `T_N`'s last solo term is priced, and it is not contended either** →
+ `RESULTS_corun_recipe.md` §P3.7j, tool `tools/corun/co_downsep.py` + `co_downsep_device.sh`,
+ capture `corun_downsep_20261116_034737` (gate PASS TPU 27.0 vs 27.0, battery 24.0; same boot).
+ Four arms in one `adb shell`: `npu_block downsep` (7×FC`[1536,1280]`+6×ADD, the 0.2580 s term)
+ measures **62.769 ms/tile solo (n=48) ⇒ 0.2511 s/block**, **63.334 ms/tile contended (n=119) ⇒
+ 0.2533 s/block = +0.90 %**, and the co-run's own non-overlapped tiles read 63.132 — the delta is
+ inside the arm-to-arm spread, so **no contention penalty on the down projection**. Same-session
+ controls: recipe **637.13 ms** (n=7, 0.4 % from P3.7h ⇒ same boot), GPU **160.79 → 146.70 ms**
+ contended, GPU-side overlap **99.9 %**. **`T_N` exact is now co-run end to end: 0.6371 + 0.2533 =
+ 0.8905 s/block** (0.8974 with the solo downsep, −0.8 %) ⇒ `k_b*` **165, period 24.21 s, 7.06×**
+ vs locked 160 — reported, not applied, and insensitive (165 either way). Two harness defects
+ fixed: **`npu_block downsep` was unrunnable from CLI defaults** (`G_PC` defaults to 1 = per-column,
+ which `FULLY_CONNECTED` rejects at `addOperation` → `BAD_DATA` in 150 ms; the mode now forces
+ per-tensor like `attn`), and **`$10` in POSIX `sh` is `${1}0`** (turned `--recipe-reps 8` into
+ 100). New: per-tile `TS|downsep` stamps and a `--from-logs TS` re-parse path (raw logs +
+ `.ctx.json` sidecar written *before* analysis, so an analysis bug costs a re-parse, not a run).
+ **NEXT ACTION: the real Phase-3 remainder, in this order — (a) `--decode 1` is still a no-op stub
+ (it prints the 10.640 s hybrid reference and executes nothing), so the stage has no decode; (b)
+ Gate 1's FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg and `calibrate.py` remain the only host-only
+ work and `.venv-ref` exists; (c) Gate 5, the ≥10-chunk end-to-end run with the decode in it.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
@@ -411,6 +429,14 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   (`/bin/bash: C:/…: No such file or directory`) and the build **silently never runs** — WSL mounts
   this repo at `/mnt/c`, so neither the `C:/` nor the `/c/` form resolves. Always go through
   `probe_host.bash_bin()` / `run()`; never spawn a bare `bash` for a build script.
+- **`$10` in a POSIX `sh` device script is `${1}0`** (measured 2026-11-16). `RECIPE=$10` after a
+  `$1` of 10 produced **`--recipe-reps 100`** — 74 s of device time instead of 15, visible only in
+  the `reps=` field of the SUMMARY line. Use `${10}` for every positional past the ninth.
+- **`npu_block`'s `G_PC` defaults to 1 (per-column), and `FULLY_CONNECTED` rejects per-channel at
+  `addOperation`** — so any mode that does not force `G_PC = 0` dies in ~150 ms with
+  `FATAL|addOperation … rc=4(BAD_DATA)` and never reaches the compiler. `attn` already did this;
+  `downsep` did not, and was **unrunnable from the CLI defaults** until 2026-11-16 (the 0.2580 s
+  reference must have passed the per-tensor argument explicitly). Every new FC mode needs it.
 - **`smaps` does not see a GPU process's memory.** `/proc/<pid>/smaps_rollup` reported
   `Pss` 85,137 kB for `proc_a` while `dumpsys meminfo <pid>` reported `TOTAL PSS`
   **249,290 kB** for the same PID — the gap is the **`GL mtrack`** row (164,192 kB), the

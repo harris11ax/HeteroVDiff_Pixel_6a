@@ -127,3 +127,54 @@ with the network on carries a ~10 % penalty, which would reach back into `RESULT
 **Next measurement (host-cheap, ~25 s of device time):** at the floor with **network ON**, run
 `python tools/pipe/tn_recipe.py --reps 8`. Floor + network on + ~707 ms ⇒ background load is the
 cause; floor + network on + ~647 ms ⇒ the 02:09 numbers are a device-state artifact of that session.
+
+## P3.7j — `ffn.down` under contention: the last solo term in `T_N` is not contended either
+
+Capture `corun_downsep_20261116_034737` · tool `tools/corun/co_downsep.py` +
+`co_downsep_device.sh` · gate **PASS at TPU 27.0 vs 27.0** (battery 24.0), boot `02:20:08`
+(same boot as P3.7g–i) · device wall 125 s.
+
+`proc_b --recipe` prices nine GEMMs; the down projection is a separate path
+(`npu_block downsep`: 7 × FC`[1536,1280]` + 6 × ADD, `RESULTS_npu_tn.md` §4) whose 0.2580 s was
+the only solo number left in the exact `T_N`. This run puts it under GPU load. Four arms, one
+`adb shell`, one thermal state:
+
+| arm | n (tiles) | min | median | max |
+|---|---|---|---|---|
+| `downsep` alone | 48 | 60.025 | **62.769 ms/tile** | 74.532 |
+| co-run arm, GPU **not** executing | 73 | 53.478 | 63.132 ms/tile | 72.025 |
+| co-run arm, GPU **executing** | 119 | 59.907 | **63.334 ms/tile** | 68.159 |
+
+- `ffn.down` alone: **0.2511 s/block** (4 × 384-token tiles) — **2.7 % below** the 0.2580 s
+  reference it reproduces; contended: **0.2533 s/block**, i.e. **+0.90 %**.
+- That +0.9 % is **inside the arm-to-arm spread, not a contention effect**: the co-run's own
+  non-overlapped tiles read 63.132 ms against 63.334 for the overlapped ones (0.3 % apart), while
+  the separate solo arm sits 0.6 % below both. So the down projection — like the nine GEMMs and
+  like the GPU — shows **no measurable contention penalty**.
+- Control arms from the same session: solo recipe **637.13 ms** (n = 7, pass ≥ 2), 0.4 % from
+  P3.7h's 639.44 — same boot, so the sum below is same-boot; GPU Preset-A block **160.79 ms solo
+  → 146.70 ms contended** (the same "faster under load" direction, cause still unestablished),
+  median GPU-side overlap **99.9 %**.
+- `T_N` exact, **all terms co-run for the first time**: 0.6371 (recipe) + 0.2533 (downsep) =
+  **0.8905 s/block**, against 0.8974 with the solo downsep (−0.8 %). `solve_cut.py` on the
+  measured pair (`T_G` 0.1467): **`k_b*` = 165, period 24.21 s, 7.06× vs NPU-only** — the cut is
+  insensitive to the 0.8 % (165 at both ends); the locked 160 is untouched, 165 reported.
+
+Two harness defects found and fixed en route:
+
+- **`npu_block downsep` could not run at all from the CLI defaults.** `G_PC` defaults to **1**
+  (per-output-column scales) and `FULLY_CONNECTED` rejects `SYMM_PER_CHANNEL` at `addOperation`
+  (`BAD_DATA`) before compiling — the trap the `attn` mode already closed. First attempt died in
+  150 ms with `FATAL|addOperation ... rc=4(BAD_DATA)`; the mode now forces `G_PC = 0` and prints
+  the reason. The 0.2580 s reference must therefore have been taken with the per-tensor argument
+  passed explicitly.
+- **`$10` in POSIX `sh` is `${1}0`**, so `--recipe-reps "$10"` became **100** passes (74 s) in the
+  first attempt; the script uses `${10}` now (the second attempt ran the intended 8).
+
+Also added: `TS|downsep|tile=…|t0=…|t1=…` per tile (the stamps the classification needs), and a
+`--from-logs TS` re-parse path that reads the saved raw logs + a `.ctx.json` sidecar — an analysis
+crash after the device run now costs a re-parse, not a second device visit.
+
+**Not proved:** the activation in this mode is the deterministic fill the 0.2580 reference used
+(latency-only, no numerics claimed), one block region, and the recipe's *contended* number is
+still P3.7g's (this run's recipe arm is solo).
