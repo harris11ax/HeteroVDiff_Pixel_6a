@@ -127,12 +127,14 @@ def gate(serial: str, wait_s: int) -> tuple[dict, float | None, float | None, bo
         time.sleep(20)
 
 
-def runner_text(serial: str, args) -> str:
+def runner_text(serial: str, args, pub_every: int) -> str:
     b = (f"./hv_proc_b --block {R_BLK} --scales {R_SCL} --ring {R_RING} "
          f"--blocks {args.chunks} --nblocks {args.nblocks} --M {args.M} "
-         f"--down {args.down} --source none --decode {args.decode}")
+         f"--down {args.down} --source none --decode {args.decode} "
+         f"--hash-every {args.hash_every}")
     a = (f"./hv_proc_a --block {R_BLK} --scales {R_SCL} --cl {R_CL} --ring {R_RING} "
-         f"--blocks {args.chunks} --M {args.M} --route {args.route} --drain none "
+         f"--blocks {args.chunks * pub_every} --pub-every {pub_every} "
+         f"--once-blocks {args.once_blocks} --M {args.M} --route {args.route} --drain none "
          f"--warmup {args.warmup}")
     return (
         "#!/system/bin/sh\n"
@@ -193,10 +195,21 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--block-idx", type=int, default=0)
     ap.add_argument("--gate-wait", type=int, default=0, help="seconds to wait for the thermal gate")
+    ap.add_argument("--pub-every", type=int, default=None,
+                    help="GPU blocks per handoff (default: --nblocks). The cut hands off once per "
+                         "160 GPU blocks while the NPU runs 20 — that asymmetry is the pipeline.")
+    ap.add_argument("--hash-every", type=int, default=1,
+                    help="hash ffn.up's 13.7 MB output every N NPU blocks (1 = every block, the "
+                         "P3.3/P3.4 behaviour; 20 removes a measured ~80 ms/block dead gap)")
+    ap.add_argument("--once-blocks", type=int, default=4,
+                    help="length of the GPU closure-reference pass (0/negative = all blocks)")
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--timeout", type=int, default=420)
     ap.add_argument("--serial", default=None)
     args = ap.parse_args()
+    pub_every = args.pub_every if args.pub_every else args.nblocks
+    if args.once_blocks <= 0:
+        args.once_blocks = args.chunks * pub_every
 
     bins = {"a": PIPE_DIR / "build" / "proc_a", "b": PIPE_DIR / "build" / "proc_b"}
     if args.build or not all(p.exists() for p in bins.values()):
@@ -240,13 +253,14 @@ def main() -> int:
     adb(serial, "logcat -c")          # rule: clear the NNAPI buffer before graph work
 
     tmp = Path(tempfile.gettempdir()) / "hv_stream_runner.sh"
-    tmp.write_bytes(runner_text(serial, args).encode())
+    tmp.write_bytes(runner_text(serial, args, pub_every).encode())
     rc, txt = run([str(ADB), "-s", serial, "push", str(tmp), R_RUNNER], timeout=300)
     if rc != 0:
         print(f"push runner failed: {txt}", file=sys.stderr)
         return 2
 
-    print(f"  running: chunks={args.chunks} nblocks={args.nblocks} M={args.M} "
+    print(f"  running: chunks={args.chunks} nblocks={args.nblocks} pub-every={pub_every} "
+          f"gpu-blocks={args.chunks * pub_every} hash-every={args.hash_every} M={args.M} "
           f"down={args.down} route={args.route}")
     t_wall0 = time.time()
     rc, out = adb(serial, f"shell sh {R_RUNNER}", timeout=args.timeout)
@@ -263,18 +277,19 @@ def main() -> int:
 
     # ------------------------------------------------------------------ GPU side
     gpu_ts = [kv(l) for l in a_lines if l.startswith("TS|gpu|")]
+    gpu_pubts = [g for g in gpu_ts if g.get("pub") == 1]
     gpu_blocks = [g for g in gpu_ts if isinstance(g.get("block_ms"), (int, float))]
     gpu_ms = [float(g["block_ms"]) for g in gpu_blocks]
     gpu_once = [float(kv(l)["ms_once"]) for l in a_lines
                 if l.startswith("TSC|gpu|") and "ms_once" in l]
     gpu_occ: list[tuple[float, float]] = []       # compute + payload + publish
     gpu_iv: list[tuple[float, float]] = []        # compute only
-    pub_ns = [int(g["t_pub_ns"]) for g in gpu_blocks if "t_pub_ns" in g]
+    pub_ns = [int(g["t_pub_ns"]) for g in gpu_pubts if "t_pub_ns" in g]
     for g in gpu_blocks:
         t0 = float(g["t0_ms"])
         t1 = float(g["t1_ms"])
         gpu_iv.append((t0, t1))
-        end = float(g["t_pub_ns"]) / 1e6 if "t_pub_ns" in g else t1
+        end = float(g["t_pub_ns"]) / 1e6 if g.get("pub") == 1 and "t_pub_ns" in g else t1
         gpu_occ.append((t0, end))
     gpu_a = {l.split("|")[1]: kv(l) for l in a_lines if l.startswith("SUMMARY|")}
     gpu_result = next((kv(l) for l in a_lines if l.startswith("RESULT|")), {})
@@ -342,7 +357,8 @@ def main() -> int:
     npu_done = ratio(npu_result.get("chunks"))
     npu_execs = ratio(npu_result.get("gemm_execs"))
     verdict = (rc == 0 and not fatal
-               and len(gpu_blocks) == chunks
+               and len(pub_ns) == chunks
+               and len(gpu_blocks) == chunks * pub_every
                and len(npu_cons) == chunks
                and nan_words == 0
                and gpu_pub == (chunks, chunks)
@@ -352,13 +368,17 @@ def main() -> int:
     res = {
         "serial": serial,
         "timestamp": ts,
-        "stage": "P3.4 stream.py (coordinator: proc_a producer + proc_b consumer, one ring)",
+        "stage": "P3.4/P3.5 stream.py (coordinator: proc_a producer + proc_b consumer, one ring)",
         "M": args.M, "chunks": chunks, "nblocks": args.nblocks,
+        "pub_every": pub_every, "gpu_blocks_run": len(gpu_blocks),
+        "hash_every": args.hash_every,
         "down": args.down, "route": args.route, "warmup": args.warmup,
         "wall_s": wall_s,
         "launch": stream,
         "gpu": {
-            "blocks_published": len(gpu_blocks),
+            "chunks_published": len(pub_ns),
+            "blocks_run": len(gpu_blocks),
+            "blocks_published": len(pub_ns),
             "block_ms": stats(gpu_ms),
             "block_ms_series": gpu_ms,
             "block_ms_once": stats(gpu_once),
@@ -409,11 +429,14 @@ def main() -> int:
 
     gb, nb = res["gpu"]["block_ms"] or {}, res["npu"]["block_ms"] or {}
     ovl = res["overlap"]
-    L = [f"# P3.4 — coordinator: two stages, one ring — {ts}", "",
+    L = [f"# P3.4/P3.5 — coordinator: two stages, one ring — {ts}", "",
          f"serial `{serial}` · M={args.M} · **{chunks} chunks × {args.nblocks} NPU block(s)** · "
-         f"GPU route **{args.route}** · `ffn.down` = {args.down} · wall **{wall_s:.1f} s**", "",
+         f"GPU **{args.chunks * pub_every} blocks, handoff every {pub_every}** · "
+         f"GPU route **{args.route}** · `ffn.down` = {args.down} · "
+         f"`ffn.up` hash every {args.hash_every} NPU block(s) · wall **{wall_s:.1f} s**", "",
          "## Verdict", "",
-         f"- **{'PASS' if verdict else 'FAIL'}** — GPU published **{len(gpu_blocks)}/{chunks}** chunks, "
+         f"- **{'PASS' if verdict else 'FAIL'}** — GPU published **{len(pub_ns)}/{chunks}** chunks over "
+         f"{len(gpu_blocks)} blocks, "
          f"NPU consumed **{len(npu_cons)}/{chunks}**, fatal={len(fatal)}, "
          f"NaN words={nan_words}, zero words={zero_words}, rc={rc}",
          f"- weights: {res['gpu']['weights'].get('imported', '?')}/"
@@ -421,16 +444,19 @@ def main() -> int:
          f"one `createFromFd` view on the NPU side (one stored INT8 copy)",
          "", "## Numbers (device, this run)", "",
          "| quantity | value |", "|---|---|",
-         f"| GPU block (per chunk) | **{fu(gb.get('median'))} ms** median "
+         f"| GPU block (all {len(gpu_blocks)} blocks) | **{fu(gb.get('median'))} ms** median "
          f"(min {fu(gb.get('min'))}, max {fu(gb.get('max'))}, n={gb.get('n')}) |",
          f"| NPU block on the TPU | **{fu(nb.get('median'))} ms** median (n={nb.get('n')}) |",
+         f"| `ffn.up` output hash cost | "
+         f"{fu((npu_a.get('npu') or {}).get('out_hash_ms_total'), '{:.1f}')} ms over "
+         f"{(npu_a.get('npu') or {}).get('out_hash_calls', '?')} hash(es) |",
          f"| chunk window, NPU | {fu((res['npu']['chunk_window_ms'] or {}).get('median'))} ms median |",
          f"| GPU publish interval | {fu((res['gpu']['publish_interval_s'] or {}).get('median'), '{:.3f}')} s "
          f"median between chunk publishes |",
          f"| NPU chunk finish interval | "
          f"{fu((res['npu']['finish_interval_s'] or {}).get('median'), '{:.3f}')} s median |",
-         f"| publish→consume | {fu((res['npu']['publish_to_consume_us'] or {}).get('mean'), '{:.0f}')} µs mean, "
-         f"{fu((res['npu']['publish_to_consume_us'] or {}).get('max'), '{:.0f}')} µs max |",
+         f"| publish→consume | {fu((res['npu']['publish_to_consume_us'] or {}).get('mean'), '{:.2f}')} µs mean, "
+         f"{fu((res['npu']['publish_to_consume_us'] or {}).get('max'), '{:.2f}')} µs max |",
          f"| GPU back-pressure (slot wait) | {fu((res['gpu']['slot_wait_us'] or {}).get('max'), '{:.0f}')} µs max |",
          f"| payload conversion (host-side) | {fu((res['gpu']['payload_ms'] or {}).get('median'), '{:.1f}')} ms per chunk |",
          "", "## Overlap (both engines executing at once)", "",

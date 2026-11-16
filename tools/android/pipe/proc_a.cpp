@@ -278,6 +278,8 @@ struct Args {
     int M = 1530;
     std::string drain = "fork";
     int warmup = 1;
+    int pub_every = 1;      // publish one chunk per N blocks (the cut hands off once per 160)
+    int once_blocks = -1;   // closure-reference pass length; -1 = all blocks
 };
 
 static Args parse(int argc, char** argv) {
@@ -297,14 +299,19 @@ static Args parse(int argc, char** argv) {
         else if (k == "--M") a.M = atoi(val("--M").c_str());
         else if (k == "--drain") a.drain = val("--drain");
         else if (k == "--warmup") a.warmup = atoi(val("--warmup").c_str());
+        else if (k == "--pub-every") a.pub_every = atoi(val("--pub-every").c_str());
+        else if (k == "--once-blocks") a.once_blocks = atoi(val("--once-blocks").c_str());
         else if (k == "--help" || k == "-h") {
             pl("usage: proc_a --block B --scales S [--cl C] [--ring R] [--blocks N] "
-               "[--M 1530] [--route import|copy] [--drain fork|none]");
+               "[--M 1530] [--route import|copy] [--drain fork|none] [--pub-every N] "
+               "[--once-blocks N]");
             std::exit(0);
         } else { pl("FATAL|unknown_arg|%s", k.c_str()); std::exit(2); }
     }
     if (a.block.empty() || a.scales.empty()) { pl("FATAL|need --block and --scales"); std::exit(2); }
     if (a.blocks < 1) a.blocks = 1;
+    if (a.pub_every < 1) a.pub_every = 1;
+    if (a.once_blocks == 0 || a.once_blocks > a.blocks) a.once_blocks = a.blocks;
     if (a.drain == "fork" && a.blocks <= hv::SLOTS) a.drain = "fork";  // harmless
     return a;
 }
@@ -357,7 +364,8 @@ struct DrainStats {
 };
 
 static int run_drain(const Args& a, hv::Ring& r, DrainStats* st) {
-    for (int chunk = 1; chunk <= a.blocks; ++chunk) {
+    const int npub = (a.blocks + a.pub_every - 1) / a.pub_every;
+    for (int chunk = 1; chunk <= npub; ++chunk) {
         const int s = (chunk - 1) % hv::SLOTS;
         std::uint64_t t_seen = 0;
         if (!hv::wait_publish(r, s, (std::uint64_t)chunk, 120ull * 1'000'000'000ull, &t_seen)) {
@@ -620,17 +628,28 @@ int main(int argc, char** argv) {
     std::vector<double> block_ms;
     std::uint64_t pub_count = 0, msync_max = 0, wait_max = 0, conv_max = 0;
     int rc = 0;
+    const int npub = (a.blocks + a.pub_every - 1) / a.pub_every;
     std::uint16_t* hpay = reinterpret_cast<std::uint16_t*>(ring.payload(0));   // placeholder
 
     for (int blk_i = 1; blk_i <= a.blocks; ++blk_i) {
-        const int s = (blk_i - 1) % hv::SLOTS;
+        // Publish only every `pub_every` blocks, and always the last one. The cut
+        // hands off ONCE per 160 GPU blocks, so per-block publishing was the wrong
+        // cadence: P3.4 measured the GPU finishing 2x20 blocks in 0.214 s and then
+        // idling 18.4 s (overlap 1.1 %). Slot/seq numbering is by PUBLISH ordinal,
+        // which keeps the ring protocol (done >= seq - SLOTS) unchanged.
+        const bool is_pub = (blk_i % a.pub_every == 0) || (blk_i == a.blocks);
+        const int s = (int)(pub_count % (std::uint64_t)hv::SLOTS);
         std::uint64_t waited = 0;
-        if (!hv::wait_free(ring, s, (std::uint64_t)blk_i, 300ull * 1'000'000'000ull, &waited)) {
-            pl("FATAL|slot_never_freed|block=%d|slot=%d", blk_i, s);
-            rc = 2;
-            break;
+        if (is_pub) {
+            if (!hv::wait_free(ring, s, (std::uint64_t)(pub_count + 1),
+                               300ull * 1'000'000'000ull, &waited)) {
+                pl("FATAL|slot_never_freed|block=%d|slot=%d|seq=%" PRIu64,
+                   blk_i, s, (std::uint64_t)(pub_count + 1));
+                rc = 2;
+                break;
+            }
+            if (waited > wait_max) wait_max = waited;
         }
-        if (waited > wait_max) wait_max = waited;
 
         double t0 = 0, t1 = 0;
         double gsum = 0;
@@ -669,38 +688,52 @@ int main(int argc, char** argv) {
 
         // Dequantised ffn.down output -> fp16 residual into the slot (the payload
         // the NPU stage consumes). Timed, because it is work the GPU stage owns.
-        const double c0 = (double)hv::now_ns() / 1e6;
-        std::vector<float> host_c((size_t)M * KD);
-        c.EnqueueReadBuffer(c.q, dn.C, CL_TRUE, 0, host_c.size() * sizeof(float), host_c.data(),
-                            0, nullptr, nullptr);
-        hpay = reinterpret_cast<std::uint16_t*>(ring.payload(s));
-        for (size_t i = 0; i < host_c.size(); ++i) hpay[i] = f2h(host_c[i]);
-        const double c1 = (double)hv::now_ns() / 1e6;
-        const std::uint64_t conv_us = (std::uint64_t)((c1 - c0) * 1000.0);
-        if (conv_us > conv_max) conv_max = conv_us;
-
+        // Only on a publish block: with pub_every > 1 the chunk boundary is the
+        // group's last block, and converting on every block would be work the
+        // pipeline never does.
+        double payload_ms = 0.0;
         long msync_ns = 0;
-        hv::publish(ring, s, (std::uint64_t)blk_i, (std::uint32_t)hv::CHUNK_BYTES,
-                    hv::Msync::FirstPage, &msync_ns);
-        if (msync_ns > 0 && (std::uint64_t)msync_ns > msync_max) msync_max = (std::uint64_t)msync_ns;
-        ++pub_count;
+        if (is_pub) {
+            const double c0 = (double)hv::now_ns() / 1e6;
+            std::vector<float> host_c((size_t)M * KD);
+            c.EnqueueReadBuffer(c.q, dn.C, CL_TRUE, 0, host_c.size() * sizeof(float), host_c.data(),
+                                0, nullptr, nullptr);
+            hpay = reinterpret_cast<std::uint16_t*>(ring.payload(s));
+            for (size_t i = 0; i < host_c.size(); ++i) hpay[i] = f2h(host_c[i]);
+            const double c1 = (double)hv::now_ns() / 1e6;
+            payload_ms = c1 - c0;
+            const std::uint64_t conv_us = (std::uint64_t)((c1 - c0) * 1000.0);
+            if (conv_us > conv_max) conv_max = conv_us;
+
+            hv::publish(ring, s, (std::uint64_t)(pub_count + 1), (std::uint32_t)hv::CHUNK_BYTES,
+                        hv::Msync::FirstPage, &msync_ns);
+            if (msync_ns > 0 && (std::uint64_t)msync_ns > msync_max) msync_max = (std::uint64_t)msync_ns;
+            ++pub_count;
+        }
 
         const double bms = t1 - t0;
         block_ms.push_back(bms);
-        pl("TS|gpu|block=%d|slot=%d|t0_ms=%.3f|t1_ms=%.3f|block_ms=%.3f|gemm_ms_sum=%.3f"
-           "|payload_ms=%.3f|msync_ns=%ld|slot_wait_us=%" PRIu64 "|t_pub_ns=%" PRIu64,
-           blk_i, s, t0, t1, bms, gsum, c1 - c0, msync_ns, waited / 1000, hv::now_ns());
+        if (is_pub) {
+            pl("TS|gpu|block=%d|slot=%d|t0_ms=%.3f|t1_ms=%.3f|block_ms=%.3f|gemm_ms_sum=%.3f"
+               "|payload_ms=%.3f|msync_ns=%ld|slot_wait_us=%" PRIu64 "|t_pub_ns=%" PRIu64
+               "|pub=1|chunk=%" PRIu64,
+               blk_i, s, t0, t1, bms, gsum, payload_ms, msync_ns, waited / 1000, hv::now_ns(),
+               (std::uint64_t)pub_count);
+        } else {
+            pl("TS|gpu|block=%d|t0_ms=%.3f|t1_ms=%.3f|block_ms=%.3f|gemm_ms_sum=%.3f|pub=0",
+               blk_i, t0, t1, bms, gsum);
+        }
         if (rc) break;
     }
 
-    __atomic_store_n(&ring.hdr((a.blocks - 1) % hv::SLOTS)->flags, hv::FLAG_STREAM_DONE,
+    __atomic_store_n(&ring.hdr((npub - 1) % hv::SLOTS)->flags, hv::FLAG_STREAM_DONE,
                      __ATOMIC_RELEASE);
 
     // --- reference-equivalent pass: the same 10 dispatches with ONE closure per
     //     block (the form the 0.1474 s co-run base block was measured in). No
     //     handoff here — this isolates the compute from the per-GEMM TS stamps.
     std::vector<double> once_ms;
-    for (int blk_i = 0; blk_i < a.blocks; ++blk_i) {
+    for (int blk_i = 0; blk_i < a.once_blocks; ++blk_i) {
         int probe = 0;
         const double t0 = hv::now_ns() / 1e6;
         for (int i = 0; i < NG; ++i) dispatch(i, nullptr);
@@ -738,13 +771,15 @@ int main(int argc, char** argv) {
     const double macs = (double)M * (8.0 * KD * KD + 2.0 * KD * NUP);
     pl("SUMMARY|gpu|blocks=%d|gemms_per_block=%d|block_ms_min=%.3f|block_ms_median=%.3f"
        "|block_ms_mean=%.3f|gops_median=%.2f|payload_bytes=%zu|msync_max_ns=%" PRIu64
-       "|payload_conv_max_us=%" PRIu64 "|slot_wait_max_us=%" PRIu64,
+       "|payload_conv_max_us=%" PRIu64 "|slot_wait_max_us=%" PRIu64
+       "|pub_every=%d|chunks_published=%" PRIu64,
        (int)block_ms.size(), NG, bmin, bmed, block_ms.empty() ? 0.0 : bsum / block_ms.size(),
-       2.0 * macs / (bmed * 1e6), hv::CHUNK_BYTES, msync_max, conv_max, wait_max / 1000);
+       2.0 * macs / (bmed * 1e6), hv::CHUNK_BYTES, msync_max, conv_max, wait_max / 1000,
+       a.pub_every, pub_count);
 
-    const bool pass = (rc == 0 && drc == 0 && pub_count == (std::uint64_t)a.blocks);
+    const bool pass = (rc == 0 && drc == 0 && pub_count == (std::uint64_t)npub);
     pl("RESULT|%s|published=%" PRIu64 "/%d|drain_rc=%d|route=%s|imported_weights=%d/%d",
-       pass ? "PASS" : "FAIL", pub_count, a.blocks, drc, a.route.c_str(), imported_count, NG);
+       pass ? "PASS" : "FAIL", pub_count, npub, drc, a.route.c_str(), imported_count, NG);
     for (int i = 0; i < NG; ++i) {
         if (kernels[i]) c.ReleaseKernel(kernels[i]);
         if (Wm[i]) c.ReleaseMemObject(Wm[i]);

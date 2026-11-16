@@ -401,6 +401,9 @@ struct Args {
     int nblocks = 1;               // NPU blocks per chunk (the cut's 180 - k)
     int M = 1530;                  // tokens per chunk
     int decode = 1;                // emit the decode budget line
+    int hash_every = 1;            // hash ffn.up's 13.7 MB output every N blocks (0 = never)
+                                  // 1 = every block (the P3.3/P3.4 behaviour, ~80 ms dead
+                                  // gap per block measured there)
 };
 
 static Args parse(int argc, char** argv) {
@@ -420,13 +423,15 @@ static Args parse(int argc, char** argv) {
         else if (k == "--nblocks") a.nblocks = atoi(val("--nblocks").c_str());
         else if (k == "--M") a.M = atoi(val("--M").c_str());
         else if (k == "--decode") a.decode = atoi(val("--decode").c_str());
+        else if (k == "--hash-every") a.hash_every = atoi(val("--hash-every").c_str());
         else if (k == "--help" || k == "-h") {
             P("usage: proc_b --block B [--scales S] [--ring R] [--blocks N] [--nblocks N] [--M 1530]"
-              " [--down skip|stage] [--source fork|none] [--decode 0|1]");
+              " [--down skip|stage] [--source fork|none] [--decode 0|1] [--hash-every N]");
             std::exit(0);
         } else { P("FATAL|unknown_arg|%s", k.c_str()); std::exit(2); }
     }
     if (a.block.empty()) { P("FATAL|need --block"); std::exit(2); }
+    if (a.hash_every < 0) a.hash_every = 0;
     if (a.down != "skip" && a.down != "stage") { P("FATAL|bad_down|%s", a.down.c_str()); std::exit(2); }
     if (a.source != "fork" && a.source != "none") { P("FATAL|bad_source|%s", a.source.c_str()); std::exit(2); }
     if (a.blocks < 1) a.blocks = 1;
@@ -605,6 +610,8 @@ int main(int argc, char** argv) {
     double quant_ms_total = 0, down_ms_total = 0, gather_act_ms_total = 0;
     std::uint64_t lat_min = ~0ull, lat_max = 0, lat_sum = 0;
     std::uint64_t hash_chain = FNV0, out_hash = FNV0;
+    std::uint64_t out_hash_calls = 0;
+    double out_hash_ms_total = 0.0;
     std::vector<double> chunk_block_ms;
     int proto_err = 0;
 
@@ -740,8 +747,17 @@ int main(int argc, char** argv) {
             chunk_block_ms.push_back(bms);
             P("TS|npu|chunk=%d|block=%d|t0=%.3f|t1=%.3f|ms=%.3f|down_ms=%.3f|gemms9_ms=%.3f",
               chunk, b + 1, (double)tb0 / 1e6, (double)tb1 / 1e6, bms, down_ms, gsum_block);
-            // hash the last graph's output so the artifact proves compute happened
-            out_hash = fnv(out_hash, UpOut.data(), UpOut.size());
+            // hash the last graph's output so the artifact proves compute happened.
+            // Strided: FNV over 13,762,560 B costs ~80 ms, which P3.4 measured as a
+            // dead gap between blocks (1.62 s per 20-block chunk, 12.8 s per 160) —
+            // an artifact of the harness, not of the pipeline. `--hash-every 20`
+            // keeps the evidence at 1/20 the cost; 0 disables it entirely.
+            if (a.hash_every == 1 || (a.hash_every > 1 && (b + 1) % a.hash_every == 0)) {
+                const std::uint64_t hh0 = hv::now_ns();
+                out_hash = fnv(out_hash, UpOut.data(), UpOut.size());
+                out_hash_ms_total += (hv::now_ns() - hh0) / 1e6;
+                ++out_hash_calls;
+            }
         }
         if (proto_err) break;
 
@@ -778,11 +794,13 @@ int main(int argc, char** argv) {
     P("SUMMARY|npu|chunks=%d|nblocks=%d|tiles=%d|gemm_execs=%" PRIu64 "|down_execs=%" PRIu64
       "|gemms9_ms_per_block=%.3f|block_ms_median=%.3f|quant_ms_total=%.3f|down_ms_total=%.3f"
       "|act_gather_ms_total=%.3f|lat_mean_us=%.3f|lat_max_us=%.3f|hash_chain=%016" PRIx64
-      "|out_hash=%016" PRIx64 "|compile9_ms=%.1f|compile_down_ms=%.1f|down_gather_ms=%.1f",
+      "|out_hash=%016" PRIx64 "|compile9_ms=%.1f|compile_down_ms=%.1f|down_gather_ms=%.1f"
+      "|hash_every=%d|out_hash_calls=%" PRIu64 "|out_hash_ms_total=%.3f",
       a.blocks, a.nblocks, tiles, gcalls, dcalls, per_block_g9, block_med, quant_ms_total,
       down_ms_total, gather_act_ms_total,
       chunk_block_ms.empty() ? 0.0 : (double)lat_sum / (double)chunk_block_ms.size() / 1e3,
-      lat_max / 1e3, hash_chain, out_hash, compile9_ms, down_compile_ms, down_gather_ms);
+      lat_max / 1e3, hash_chain, out_hash, compile9_ms, down_compile_ms, down_gather_ms,
+      a.hash_every, out_hash_calls, out_hash_ms_total);
     // 9-GEMM subset: 2 * MACs / (s per block). The down projection is excluded
     // when it is skipped (it runs on Mali) — stated, never folded in silently.
     P("THROUGHPUT|gemms9_mac_per_block=%.3f|gemms9_gops=%.1f|down_executed=%d",
