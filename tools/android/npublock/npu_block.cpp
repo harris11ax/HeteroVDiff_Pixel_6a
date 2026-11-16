@@ -1442,8 +1442,17 @@ static int run_convwire(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
             const double g = (double)act.sa / (double)sa_in;
             const bool plain = (g == 1.0) && (L.wiring == 0);
             for (int t = 0; t < L.fin; ++t) {
-                const int srcf = tshuf ? (t / 2) : t;
-                const int half = tshuf ? (t % 2) : 0;
+                // P3.14 MEASURED DEFECT: the temporal upsample is NOT (t/2, t%2).
+                // `WanResample.forward` emits 1 + 2(T-1) = 2T-1 frames as
+                //     frame 0        = b[0], channel half 0 only
+                //     frame 2j-1,2j  = b[j] halves 0 and 1   (j = 1 .. T-1)
+                // so b[0] contributes ONE frame and every later buffer frame two.
+                // The old (t/2, t%2) emitted both halves of b[0] and dropped b[T-1]'s
+                // last half: same frame count, wrong content — measured against the
+                // reference's own `resample.1` conv input, cosine 0.611 vs 0.954
+                // (the conv output then 0.717 vs 0.964; tools/npu/vae_sim.py).
+                const int srcf = tshuf ? (t == 0 ? 0 : (t + 1) / 2) : t;
+                const int half = tshuf ? (t == 0 ? 0 : (t + 1) % 2) : 0;
                 for (int hh = 0; hh < L.h; ++hh) {
                     const int sh = spatial ? (hh / 2) : hh;
                     for (int ww = 0; ww < L.w; ++ww) {
