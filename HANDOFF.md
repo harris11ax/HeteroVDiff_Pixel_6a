@@ -23,7 +23,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) still unmeasured ⇒ `T_V` is a lower bound on both |
-| Gate 1 (artifact) | pending — quantiser not written yet (`phase1_quant/` has only the inspector); the **scale-layout parity cost is measured** → `docs/device/RESULTS_scales.md` |
+| Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg (blocked: no torch/diffusers on this host)** |
 | Gates 3–5 | pending |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
 | **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.58 s, 5.40× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode |
@@ -101,8 +101,18 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    **done**: `configs/rates_preset_a.json` carries the measured pair; `k_b* = **160**` (period 23.58 s,
    5.40× vs NPU-only; 158 on the conservative solo pair, 162 with the Mali decode). The cut is sharp —
    step-level `k_b` (multiple of 30) costs 27 %, and dropping `T_V` from the solve costs 35 %.
-7. Phase 1 (quantiser + Gate 1) is still outstanding and needs no phone — it can run in parallel
-   or while the phone cools: `docs/05_phase_plans.md`.
+7. ~~Phase 1 (quantiser + Gate 1)~~ — **INT8 base artifact done 2026-11-15 20:5x**:
+   `phase1_quant/quantize_int8.py` (40.1 s) + `phase1_quant/verify_artifact.py` (61 s, independent:
+   re-reads the bytes, re-quantises the source, demands byte identity). 30 regions × 46,399,488 B =
+   **1,391,984,640 B INT8, delta 0** vs Gate 1; 44.25 MiB/region (limit 47.29); MAC-weighted weight
+   error **0.93 %**, cosine 0.999956, worst GEMM `ffn.net.2` 1.25 %/0.999922 — all 300 ≥ 0.999;
+   max saturation 0.070 %; FP16 remainder 54,024,320 B over 525 tensors (0.028 % worst); coverage
+   1317/1317. → `docs/device/RESULTS_gate1.md`. Bug caught en route: a suffix filter had dropped all
+   30 per-block `scale_shift_table` (276,480 params) while still printing PASS — classification is
+   now by role, with a coverage assertion in both scripts.
+   **Still open in Gate 1:** (a) the end-to-end FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg —
+   blocked, this host has no torch/diffusers; (b) deliverables 2–4 (`expert_factors.py` — expects
+   240,089,216 B FP16, `vae_export.py`, `calibrate.py`) are not written.
 8. Mid-block VAE attention (32.4 GMAC) is the last unmeasured rate; it is the only thing keeping `T_V`
    a lower bound. Needs a GEMM rate at 6120 tokens × 384 ch on both engines.
 9. Phase 3 executors, Phase 4 tables, report.

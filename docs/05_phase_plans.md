@@ -14,6 +14,7 @@ output committed under `results/`.
 | Weights downloaded (`weights_raw/DCM_WAN`) | ✅ done |
 | Reference repos cloned | ✅ done |
 | Checkpoint inventory + manifest | ✅ done (`configs/block_manifest.json`) |
+| **Gate 1 — INT8 base artifact + verifier** | ✅ done 2026-11-15 → `docs/device/RESULTS_gate1.md`; the PSNR/SSIM leg of Gate 1 is still blocked (no torch/diffusers on this host) |
 | Device capability probe built | ✅ done (`tools/android/probe/build/probe`) |
 | **Pixel 6a attached, Gate-0 probe run** | ❌ **blocked** — needs USB debugging + `adb devices` shows the phone |
 
