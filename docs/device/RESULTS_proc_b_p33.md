@@ -1,9 +1,11 @@
 # P3.3 — the NPU stage over the real INT8 artifact
 
-*Measured 2026-11-15 22:47 and 22:53 on serial `25311JEGR11811`. Reproduce with
+*Measured 2026-11-15 22:47, 22:53 and 22:54 on serial `25311JEGR11811`. Reproduce with
 `python tools/pipe/proc_b.py --chunks 3 --down skip` and `… --down stage`. Raw
-captures: `proc_b_20261115_224720.{json,md,raw.log}` (skip), `proc_b_20261115_225321.*`
-(stage). Device-side: `tools/android/pipe/proc_b.cpp`; host driver
+captures: `proc_b_20261115_225443.*` (skip, **both quoted figures below come from this
+run** — same binary as the stage run), `proc_b_20261115_225321.*` (stage), and
+`proc_b_20261115_224720.*` (skip, measured before the `UpOut` buffer fix: 381.1 ms, i.e.
+inside the same 2 % band). Device-side: `tools/android/pipe/proc_b.cpp`; host driver
 `tools/pipe/proc_b.py`.*
 
 The pipeline's NPU half now exists and runs against the **real** artifact: it is the
@@ -22,17 +24,21 @@ consumed and released, payload hash chain **MATCH** between the producer and the
 
 | path | 9-GEMM block | GOPS | source |
 |---|---|---|---|
-| P3.3 NPU stage, real artifact, over the ring | **381.1 ms** | **263** | this run (`skip`) |
-| P3.3 NPU stage, second run | 373.4 ms | 269 | this run (`stage`) |
+| P3.3 NPU stage, real artifact, over the ring (`skip`) | **377.8 ms** | **265** | this run |
+| P3.3 NPU stage, second run (`stage`) | 373.4 ms | 269 | this run |
+| P3.3 NPU stage, pre-fix binary | 381.1 ms | 263 | 22:47 run |
 | co-run harness, synthetic blob (`T_N` input to the cut) | 390.4 ms | 257 | `RESULTS_corun_tg.md` |
 | solo per-GEMM table, cool start | 417.8 ms | 222 | `RESULTS_npu_tn.md` `…_160146` |
 
-That is **0.976×** the co-run figure and **0.912×** the solo table — i.e. the stage rate the
-cut was solved with is reproduced end-to-end (real bytes, ring handoff, held compilations,
-4 dispatches per GEMM) to within the run-to-run band. Per-GEMM, the stage is
-`attn1.to_q` 30.8 / `…to_k` 30.8 / `…to_v` 30.0 / `…to_out` 29.8 / `attn2.to_q` 30.4 /
-`…to_k` 30.5 / `…to_v` 30.4 / `…to_out` 30.7 / `ffn.up` **143.8** ms per block (4 tiles),
-against the solo table's 32.2–35.5 and 146.5 ms.
+Three runs of this stage land in **373.4–381.1 ms** (2.1 % spread; 377.8 ms on the run
+quoted, 381.1 ms on the pre-fix one), i.e. **0.967×** the co-run figure and **0.904×** the solo table — the stage rate
+the cut was solved with is reproduced end-to-end (real bytes, ring handoff, held
+compilations, 4 dispatches per GEMM). Per-GEMM, the stage is
+`attn1.to_q` 29.8 / `…to_k` 29.3 / `…to_v` 30.0 / `…to_out` 30.2 / `attn2.to_q` 30.5 /
+`…to_k` 30.5 / `…to_v` 30.2 / `…to_out` 30.2 / `ffn.up` **144.6** ms per block (4 tiles),
+against the solo table's 32.2–35.5 and 146.5 ms. There is no thermal trend across the
+three starts (25.0 → 27.0 → 30.0 °C gave 381.1 → 377.8 → 373.4 ms): the ordering is
+inverted relative to temperature, i.e. the spread is run-to-run, not throttling.
 
 ## `ffn.down` — both branches, measured in the same harness
 
@@ -42,7 +48,7 @@ against the solo table's 32.2–35.5 and 146.5 ms.
 | Edge TPU, 7×K=1280 + 6×ADD over the real bytes | **272.3** | **5.75× slower** | **measured here** (`--down stage`) |
 | Edge TPU, single FC K=8960 | — | — | structurally impossible (compiler K ceiling 1664) |
 
-So a whole NPU block is either **390.5 ms** (nine GEMMs, down on Mali) or **656.8 ms**
+So a whole NPU block is either **388.1 ms** (nine GEMMs, down on Mali) or **656.8 ms**
 (nine GEMMs + down on the TPU) — the median of 3 blocks in each run. The TPU branch pays
 13 dispatches per token tile (7 FC + 6 ADD), exactly as `RESULTS_npu_tn.md` §4 predicted;
 its 272.3 ms is +5.6 % over the 258.0 ms measured there on an LCG blob, which is the
@@ -65,23 +71,26 @@ Two extra costs the TPU branch carries, both measured:
 | quantity | value |
 |---|---|
 | ring setup | `file_bytes=9,408,512`, 2 slots, stride 4,702,208, chunk 4,700,160 B |
-| payload fp16→INT8 quantisation (1530×1536 = 2,349,480 values, `SA = 1/127`) | **13.3 ms** median (5.4–13.8 ms across runs) |
-| publish→consume, first chunk (consumer already spinning) | **0.163 µs** / 0.447 µs — reproduces P3.2's 0.239 µs |
+| payload fp16→INT8 quantisation (1530×1536 = 2,349,480 values, `SA = 1/127`) | **6.6 ms** median on the quoted run (5.3–13.8 ms across the three) |
+| publish→consume, first chunk | **0.163 µs** when the consumer is already parked (reproduces P3.2's 0.239 µs); 7.9 ms when it is still setting up its buffers |
 | publish→consume, later chunks | 391–710 **ms** — this is **queueing**, not handoff cost: the consumer is mid-block when the producer publishes |
 | zero / NaN payload words | 31–45 zero words of 2,349,480, **0 NaN** |
-| TPU thermal zones | 25.0 → 31.0 °C (`skip`); 30.0 → 36.0 °C (`stage`) |
+| TPU thermal zones | 27.0 → 33.0 °C (quoted `skip`); 30.0 → 36.0 °C (`stage`) |
 
 ## Thermal honesty
 
 | run | start (TPU / skin1 / skin2 / VR-skin / battery) | gate (battery+3) | verdict |
 |---|---|---|---|
-| `skip` 22:47 | 25.0 / 23.2 / 23.6 / 23.0 / 21.8 °C | 24.8 °C | **0.2 °C over — the idle floor** |
+| `skip` 22:47 (pre-fix) | 25.0 / 23.2 / 23.6 / 23.0 / 21.8 °C | 24.8 °C | **0.2 °C over — the idle floor** |
 | `stage` 22:53 | 30.0 / 26.3 / 27.4 / 25.5 / 22.9 °C | 25.9 °C | **4.1 °C over — not table-grade** |
+| `skip` 22:54 (quoted) | 27.0 / 25.1 / 25.3 / 24.7 / 23.0 °C | 26.0 °C | **1.0 °C over — floor-grade, stated** |
 
-The `skip` run is the same floor the table-grade `T_N` capture sat on (25.0 vs a 24.8 gate,
-this device's TPU zone cannot report below 25.0). The `stage` run started hot because it
-followed the first run with no cooldown: **its down-projection number stands as a
-comparison (two branches, same harness, same artifact), not as a table-grade latency.**
+The 22:47 `skip` run sat on the same floor as the table-grade `T_N` capture (25.0 vs a 24.8
+gate; this device's TPU zone cannot report below 25.0). The two later runs were taken back
+to back with **no cooldown** — 1.0 °C and 4.1 °C over the line — so **the `stage` branch's
+down-projection number stands as a comparison (two branches, same harness, same artifact),
+not as a table-grade latency**, and the 2 % spread across the three 9-GEMM figures is
+run-to-run, not thermal (it moves the *wrong* way with temperature).
 Nothing was dropped, and nothing is presented as cool when it was not.
 
 ## Three defects this pass paid for

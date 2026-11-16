@@ -170,14 +170,14 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    + `tools/pipe/proc_b.py` are the NPU stage — one `createFromFd` view of `block_00.bin` with
    per-GEMM `setOperandValueFromMemory` windows, 9 held one-op graphs compiled in **4.52 s**,
    **108/108 executes**, 3/3 chunks consumed, producer/consumer payload hash chain **MATCH**.
-   **The 9-GEMM stage is 381.1 ms/block (263 GOPS) — 0.976× the co-run 390.4 ms the cut uses,
-   measured through the real weights and the ring.** `ffn.down` both branches in the same
+   **The 9-GEMM stage is 377.8 ms/block (265 GOPS) — 0.967× the co-run 390.4 ms the cut uses,
+   measured through the real weights and the ring; three runs 373.4–381.1 ms (2.1 % spread).** `ffn.down` both branches in the same
    harness: TPU 7×K=1280+6×ADD **272.3 ms/block** vs Mali **47.33 ms** ⇒ **5.75× slower**
-   (whole NPU block 656.8 vs 390.5 ms). The TPU branch needs a 13,762,560 B weight repack
+   (whole NPU block 656.8 vs 388.1 ms). The TPU branch needs a 13,762,560 B weight repack
    (row-major cannot be K-sliced) — **one-copy deviation, reported not adopted**. Handoff:
    first chunk 0.163 µs, later chunks **queue** (consumer mid-block: 391–710 ms) — that is
-   back-pressure, not handoff cost. Thermal: `skip` started 0.2 °C over the floor gate
-   (table-floor, stated), `stage` 4.1 °C over (comparison only, not table-grade).
+   back-pressure, not handoff cost. Thermal: `skip` started 0.2 °C (pre-fix) and 1.0 °C
+   over the floor gate (floor-grade, stated), `stage` 4.1 °C over (comparison only, not table-grade).
    **NEXT TICK: P3.4 — `phase3_pipeline/stream.py`**, the coordinator: thermal gate → push →
    launch `proc_a` and `proc_b` in the same `adb shell` with `setsid`, collect both `TS|` streams,
    compute per-chunk period, publish→consume, GPU/NPU busy and the overlap fraction. Prove
