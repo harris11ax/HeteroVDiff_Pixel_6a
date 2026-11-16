@@ -544,8 +544,12 @@ static void do_block(CL* c, Variant* v, int M, int iters, int lora_mode) {
             err = enqueue_tile(c, kd, v, M, 1536);
             c->Finish(c->q);
             c->EnqueueReadBuffer(c->q, b_attn.C, CL_TRUE, 0, sizeof(int), &probe, 0, nullptr, nullptr);
-            double dt = now_ms() - t0;
+            double t1 = now_ms();
+            double dt = t1 - t0;
             if (dt < best) best = dt;
+            // Absolute CLOCK_MONOTONIC stamps so a host can prove which samples of
+            // this process overlapped an NPU execute in another process (co-run).
+            p("TS|gpu|it=%d|lora=%d|t0=%.3f|t1=%.3f|ms=%.3f", it, lora_mode, t0, t1, dt);
         }
         const double macs = (double)M * (8.0 * 1536.0 * 1536.0 + 2.0 * 1536.0 * 8960.0);
         p("BLOCK|%s|M=%d|lora=%d|ms=%.2f|gops=%.2f|gmac=%.3f|enq=%d",

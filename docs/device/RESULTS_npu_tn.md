@@ -222,12 +222,12 @@ the graphs executed on the accelerator rather than the CPU.
 
 | quantity | state |
 |---|---|
-| `T_N` (s/block, Preset A) | **0.6758 s/block = 0.4178 (9 GEMMs, per-GEMM table) + 0.2580 (`ffn.down`, 7×K=1280 chunked)**; a measured **sum**, not yet a co-run |
+| `T_N` (s/block, Preset A) | **0.6758 s/block = 0.4178 (9 GEMMs, per-GEMM table) + 0.2580 (`ffn.down`, 7×K=1280 chunked)**; a measured **sum**. Superseded for the cut by the co-run **0.6484 s** (`RESULTS_corun_tg.md`) |
 | per-GEMM NPU rates | **measured, gate-compliant** (`…_160146`, cool start at TPU 29.0 °C) |
 | `ffn.down` chunked path | **measured** (`…_174838`, floor start at TPU 29.0 °C, 0.6 °C over a battery-driven gate) |
-| `T_V` (VAE decode) | untouched |
-| co-run `T_G` | untouched |
-| `k_b*` | TBD (blocked on `T_V` + co-run `T_G`) |
+| `T_V` (VAE decode) | **measured on both branches** → `RESULTS_vae_tv.md`, `RESULTS_corun_tg.md` |
+| co-run `T_G` | **measured 2026-11-15 19:48** → `RESULTS_corun_tg.md`: GPU base block **0.1474 s** while the TPU executed (no slowdown; 8 % faster than solo), NPU 9-GEMM round **0.3904 s** (per-GEMM Δ ≤ 4 %); `T_N` co-run = **0.6484 s** (downsep part solo) |
+| `k_b*` | **solved = 160** (`configs/rates_preset_a.json`, period 23.58 s, 5.40× vs NPU-only); caveat: `T_V` is still a lower bound (mid-block attention unmeasured), and 162 with the Mali decode |
 
 ## Next actions, in order
 
@@ -239,7 +239,11 @@ the graphs executed on the accelerator rather than the CPU.
    down projection — **the choice is the student's, the comparison is in §4**.
 3. **`T_V` — VAE decode.** No `CONV_3D` in NNAPI: either decompose the causal 3D convs into
    shifted 2D `CONV_2D` taps on the TPU, or decode on Mali in OpenCL. Measure both, report both.
-4. **Co-run `T_G`.** Two processes, one file-mapped artifact, GPU on blocks `[0,k)` while the NPU
-   runs blocks `[k,180)` + decode. This is the number the cut is allowed to use.
+4. **Co-run `T_G`.** ~~Two processes, one file-mapped artifact, GPU on blocks `[0,k)` while the NPU
+   runs blocks `[k,180)` + decode.~~ **done 2026-11-15 19:48** → `RESULTS_corun_tg.md`: 99.8 % overlap,
+   GPU base block 0.1474 s (solo 0.1618 — no contention measured), NPU 9 GEMMs 0.3904 s (solo table
+   0.4178), so this section's `T_N` of 0.6758 s becomes **0.6484 s** under the co-run and `k_b* = 160`.
+   Two open ends: `ffn.down`'s 0.2580 s is still a solo number, and the GPU got *faster* under load
+   for a reason this run did not establish (DVFS is the candidate, not a claim).
 5. **Decide the per-column-scale consequence** for the NPU stage (finding #2) — it changes Gate 1/4
    parity targets, so it must be settled before the quantiser is written.

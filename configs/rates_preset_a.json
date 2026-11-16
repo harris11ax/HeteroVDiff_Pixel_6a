@@ -1,0 +1,41 @@
+{
+  "_comment": "Measured stage rates for the B=180 cut, Preset A (9 frames @ 272x480, d_model=1536). Every value is a phone measurement; nothing here is modelled. Consumed by phase2_profile/solve_cut.py --rates.",
+  "B_block_executions": 180,
+  "B": 180,
+  "T_G": 0.1474,
+  "T_N": 0.6484,
+  "T_V": 10.554,
+  "units": "s per block (T_G, T_N); s per chunk (T_V)",
+  "provenance": {
+    "T_G": {
+      "value_s": 0.1474,
+      "kind": "co-run (Mali GEMM executing while the Edge TPU executed NNAPI graphs; 99.8% of GPU-time overlapped NPU executes)",
+      "capture": "docs/device/corun_tg_20261115_194809.json",
+      "detail": "median of 25 base-block samples (10 GEMMs, M=1530 tokens, variant tiled_64x64x32_t8x4); min 0.1460",
+      "conservative_alt_s": 0.1618,
+      "conservative_alt_source": "docs/device/RESULTS_gemm_mali.md, solo k_b* input"
+    },
+    "T_N": {
+      "value_s": 0.6484,
+      "kind": "measured sum: 9 GEMMs co-run + ffn.down downsep solo",
+      "capture": "docs/device/corun_tg_20261115_194809.json (0.3904) + npu_tn_20261115_174838.json (0.2580)",
+      "detail": "0.3904 = median of 100 rounds of 9 GEMMs x 4 tiles under GPU load; 0.2580 = 7xFC[1536,1280]+6xADD, measured solo because ffn.down has no compilable single graph (K ceiling 1664)",
+      "solo_alt_s": 0.6758
+    },
+    "T_V": {
+      "value_s": 10.554,
+      "kind": "lower bound: 36 causal convs as CONV_2D taps, gate-compliant start",
+      "capture": "docs/device/conv_sweep_20261115_182512.json",
+      "detail": "mid-block 3-D attention (32.4 GMAC) has no measured rate on either engine",
+      "mali_alt_s": 12.256
+    }
+  },
+  "cut": {
+    "solver": "phase2_profile/solve_cut.py",
+    "k_b_opt": 160,
+    "k_continuous": 159.92,
+    "period_s": 23.58,
+    "speedup_vs_npu_only": 5.396,
+    "note": "interior crossing, nearly balanced (GPU stage 23.58 s, NPU stage 23.52 s, idle 0.06 s); k_b=158 with the conservative solo pair, 162 with the Mali decode"
+  }
+}

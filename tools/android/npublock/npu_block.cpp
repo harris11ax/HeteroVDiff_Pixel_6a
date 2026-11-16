@@ -642,6 +642,10 @@ static int time_tiles(ANeuralNetworksCompilation* comp, const RunCfg& cfg, uint3
 
             tile_ms->push_back((t1 - t0) / 1e6);
             hw_ms->push_back(dur == UINT64_MAX ? -1.0 : (double)dur / 1e6);
+            // Absolute CLOCK_MONOTONIC stamps: the co-run driver uses these to
+            // prove (and quantify) temporal overlap with another process.
+            P("TS|npu|%s|tile=%d|iter=%d|t0=%.3f|t1=%.3f|ms=%.3f",
+              tag, t, it, (double)t0 / 1e6, (double)t1 / 1e6, (t1 - t0) / 1e6);
             if (it == 0)
                 P("TILE|%s|tile=%d|ms=%.3f|ms_hw=%.3f|out0=%d", tag, t,
                   (t1 - t0) / 1e6, dur == UINT64_MAX ? -1.0 : (double)dur / 1e6, (int)O[0]);
@@ -969,6 +973,113 @@ int main(int argc, char** argv) {
         P("SUMMARY|mode=chain|M=%d|tiles=%d|iters=%d|compile_ms=%.1f|ms_per_tile=%.3f|"
           "per_block_s=%.4f|gops=%.1f|samples=%zu",
           M, tiles, iters, compile_ms, per_tile, block_s, 2.0 * macs / block_s / 1e9, tm.size());
+        P("DONE");
+        return 0;
+    }
+
+    if (strcmp(mode, "corun") == 0) {
+        // Sustained NPU load for a co-run measurement: compile the 9 compilable
+        // block GEMMs ONCE, hold every compilation, then loop `iters` rounds of
+        // `tiles` executes per GEMM round-robin. ffn.down is excluded because it
+        // has no compilable graph at all (K=8960 > the 1664 compiler ceiling).
+        // Rationale: in `single` mode compiles are interleaved with the timed
+        // executes, so a concurrent GPU process would contend with the CPU-side
+        // compiler as well as the TPU — that is not a stage rate.
+        struct Slot {
+            ANeuralNetworksCompilation* comp = nullptr;
+            ANeuralNetworksModel* model = nullptr;
+            uint32_t out_id = 0;
+            int n = 0, k = 0;
+            const char* name = "";
+            std::vector<double> ms;
+        };
+        std::vector<Slot> slots;
+        double compile_total = 0;
+        for (int g = 0; g < 10; ++g) {
+            if (g == 9) continue;               // ffn.down: no compilable graph
+            Holder h; uint32_t in_id = 0, out_id = 0; why = "";
+            int brc = build_model(wmem, M, &GEMMS[g], 1, h, &in_id, &out_id, &why);
+            if (brc) { P("FATAL|corun_build|%s|why=%s", GEMMS[g].name, why); P("DONE"); return 5; }
+            rc = ANeuralNetworksModel_finish(h.m);
+            if (rc) { P("FATAL|corun_finish|%s|rc=%d(%s)", GEMMS[g].name, rc, rcs(rc));
+                      ANeuralNetworksModel_free(h.m); P("DONE"); return 6; }
+            ANeuralNetworksCompilation* comp = nullptr;
+            int64_t c0 = now_ns();
+            rc = ANeuralNetworksCompilation_createForDevices(h.m, &tpu, 1, &comp);
+            if (rc) { P("FATAL|corun_comp_create|%s|rc=%d(%s)", GEMMS[g].name, rc, rcs(rc));
+                      ANeuralNetworksModel_free(h.m); P("DONE"); return 7; }
+            ANeuralNetworksCompilation_setPreference(comp, ANEURALNETWORKS_PREFER_SUSTAINED_SPEED);
+            rc = ANeuralNetworksCompilation_finish(comp);
+            double cms = (now_ns() - c0) / 1e6;
+            compile_total += cms;
+            // NOTE: the model is NOT freed here. setInput/setOutput resolve operand
+            // descriptors through it on this HAL (freeing it -> BAD_DATA at attn1.to_q),
+            // so every model is held for the whole loop.
+            if (rc) { P("FATAL|corun_comp_finish|%s|ms=%.1f|rc=%d(%s)", GEMMS[g].name, cms, rc, rcs(rc));
+                      P("DONE"); return 7; }
+            P("CORUN_COMPILE|%s|N=%d|K=%d|ms=%.1f", GEMMS[g].name, GEMMS[g].N, GEMMS[g].K, cms);
+            Slot s; s.comp = comp; s.model = h.m; s.out_id = out_id;
+            s.n = GEMMS[g].N; s.k = GEMMS[g].K;
+            s.name = GEMMS[g].name;
+            slots.push_back(s);
+        }
+        // Everything is compiled: tell the driver the TPU is about to go to work,
+        // then spin. All 9 compilations stay live for the whole loop.
+        P("CORUN_READY|n=%zu|compile_ms=%.1f|M=%d|tiles=%d|rounds=%d",
+          slots.size(), compile_total, M, tiles, iters);
+
+        std::vector<int8_t> A((size_t)M * 1536, 1);
+        std::vector<int8_t> O((size_t)M * 8960, 0);
+        for (int r = 0; r < iters; ++r) {
+            int64_t r0 = now_ns();
+            for (auto& s : slots) {
+                for (int t = 0; t < tiles; ++t) {
+                    ANeuralNetworksExecution* ex = nullptr;
+                    int erc = ANeuralNetworksExecution_create(s.comp, &ex);
+                    if (erc) { P("FATAL|corun_exec|%s|rc=%d(%s)", s.name, erc, rcs(erc)); P("DONE"); return 8; }
+                    erc = ANeuralNetworksExecution_setInput(ex, 0, nullptr, A.data(), (size_t)M * (size_t)s.k);
+                    if (!erc) erc = ANeuralNetworksExecution_setOutput(ex, 0, nullptr, O.data(), (size_t)M * (size_t)s.n);
+                    if (erc) { P("FATAL|corun_io|%s|rc=%d(%s)", s.name, erc, rcs(erc));
+                               ANeuralNetworksExecution_free(ex); P("DONE"); return 8; }
+                    int64_t t0 = now_ns();
+                    erc = ANeuralNetworksExecution_compute(ex);
+                    int64_t t1 = now_ns();
+                    ANeuralNetworksExecution_free(ex);
+                    if (erc) { P("FATAL|corun_compute|%s|round=%d|rc=%d(%s)", s.name, r, erc, rcs(erc));
+                               P("DONE"); return 8; }
+                    s.ms.push_back((t1 - t0) / 1e6);
+                    P("TS|npu|%s|round=%d|tile=%d|t0=%.3f|t1=%.3f|ms=%.3f",
+                      s.name, r, t, (double)t0 / 1e6, (double)t1 / 1e6, (t1 - t0) / 1e6);
+                }
+            }
+            int64_t r1 = now_ns();
+            P("CORUN_ROUND|r=%d|t0=%.3f|t1=%.3f|ms=%.3f", r, (double)r0 / 1e6, (double)r1 / 1e6,
+              (r1 - r0) / 1e6);
+        }
+        double round_sum = 0; int round_n = 0;
+        for (auto& s : slots) {
+            double sum = 0; for (double v : s.ms) sum += v;
+            double mean = s.ms.empty() ? -1 : sum / (double)s.ms.size();
+            double block_s = mean * tiles / 1000.0;
+            double gmacs = (double)tiles * (double)M * (double)s.n * (double)s.k;
+            P("OP|%s|N=%d|K=%d|compile_ms=0.0|ms_per_tile=%.3f|per_block_s=%.4f|gops=%.1f",
+              s.name, s.n, s.k, mean, block_s, block_s > 0 ? 2.0 * gmacs / block_s / 1e9 : -1.0);
+            ANeuralNetworksCompilation_free(s.comp);
+            ANeuralNetworksModel_free(s.model);
+        }
+        (void)round_sum; (void)round_n;
+        // Per-block total for the 9-GEMM subset actually loaded on the TPU
+        double m9 = 0;
+        for (auto& s : slots) {
+            double sum = 0; for (double v : s.ms) sum += v;
+            double mean = s.ms.empty() ? 0 : sum / (double)s.ms.size();
+            m9 += mean * tiles / 1000.0;
+        }
+        const double macs9 = (double)tiles * (double)M * (double)(BLOCK_MACS_PER_TOKEN - (int64_t)DOWN_N * DOWN_K);
+        P("SUMMARY|mode=corun|M=%d|tiles=%d|iters=%d|compile_ms=%.1f|ms_per_tile=%.3f|"
+          "per_block_s=%.4f|gops=%.1f",
+          M, tiles, iters, compile_total, m9 / tiles * 1000.0, m9,
+          m9 > 0 ? 2.0 * macs9 / m9 / 1e9 : -1.0);
         P("DONE");
         return 0;
     }

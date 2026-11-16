@@ -25,7 +25,9 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) still unmeasured ⇒ `T_V` is a lower bound on both |
 | Gate 1 (artifact) | pending — quantiser not written yet (`phase1_quant/` has only the inspector) |
 | Gates 3–5 | pending |
-| Blocker | mid-block VAE attention has no measured rate on either engine; co-run `T_G` unmeasured ⇒ `k_b*` still TBD (`T_N/T_G = 4.18×`, `T_V` TPU 10.554 s vs Mali 12.256 s) |
+| **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
+| **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.58 s, 5.40× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode |
+| Blocker | mid-block VAE attention has no measured rate on either engine (`T_V` is a lower bound); `ffn.down` is not in the contended number. `T_V` 10.554 s (TPU) vs 12.256 s (Mali) — TPU-favourable |
 
 ## The two results that changed the project
 
@@ -55,10 +57,12 @@ projection belongs on Mali whichever way the cut lands. Both branches are measur
 the student's.
 
 Caveat that must survive into the paper: 161.8 ms and the NPU per-GEMM rates are **solo** kernel
-rates. The NPU rates are now gate-compliant (cool start, TPU 29.0 °C, capture `…_160146`) and a cool
-start is **1.6 % slower** than the earlier hot ones, i.e. nothing was throttled. Every stage rate in
-the cut must still come from a co-run measurement. Reaching the idle floor took 17 min with the
-device network off — use `python tools/npu/cool_rerun.py`, never a bare timed run.
+rates, and a cool start is **1.6 % slower** than the earlier hot ones, i.e. nothing was throttled.
+The co-run then closed the gap the cut actually needs (`RESULTS_corun_tg.md`): with both engines
+executing at once the GPU base block costs **0.1474 s** and the NPU's 9-GEMM round **0.3904 s** —
+neither engine loses its solo rate (the GPU measured 8 % *faster* under load). `T_G`/`T_N` from the
+co-run give **`k_b* = 160`** (period 23.58 s, 5.40× vs NPU-only). Reaching the idle floor took 17 min
+with the device network off — use `python tools/npu/cool_rerun.py`, never a bare timed run.
 
 ## Ordered next actions
 
@@ -83,12 +87,20 @@ device network off — use `python tools/npu/cool_rerun.py`, never a bare timed 
    rate on either engine, so `T_V` is a lower bound both ways; (b) the Mali conv runs at
    48 % of its own GEMM rate (378–486 vs 877 GOPS) because the activation tile is re-staged
    per tap — a halo-staged tile is the next measurement, not a model.
-5. **Co-run `T_G`.** Two processes, one file-mapped artifact, GPU on blocks `[0,k)` while the
-   NPU runs blocks `[k,180)` + decode. This is the number the cut is allowed to use.
-6. `python phase2_profile/solve_cut.py --Tg … --Tn … --Tv …` → commit the measured `k_b*`.
+5. ~~**Co-run `T_G`**~~ — **done 2026-11-15 19:48** (`RESULTS_corun_tg.md`, capture `corun_tg_20261115_194809`):
+   two processes, one `adb shell`, 99.8 % overlap proven from `CLOCK_MONOTONIC` stamps. GPU base block
+   **0.1474 s** co-run vs 0.1618 solo (it got *faster*, not slower — contention below the noise floor),
+   NPU 9 GEMMs **0.3904 s** co-run (±4 % per GEMM vs solo) ⇒ `T_N` co-run = 0.6484 s (downsep part still
+   solo). New tool: `python tools/corun/co_run.py` (`npu_block corun` holds 9 compilations and loops).
+6. ~~`python phase2_profile/solve_cut.py --Tg … --Tn … --Tv …` → commit the measured `k_b*`~~ —
+   **done**: `configs/rates_preset_a.json` carries the measured pair; `k_b* = **160**` (period 23.58 s,
+   5.40× vs NPU-only; 158 on the conservative solo pair, 162 with the Mali decode). The cut is sharp —
+   step-level `k_b` (multiple of 30) costs 27 %, and dropping `T_V` from the solve costs 35 %.
 7. Phase 1 (quantiser + Gate 1) is still outstanding and needs no phone — it can run in parallel
    or while the phone cools: `docs/05_phase_plans.md`.
-8. Phase 3 executors, Phase 4 tables, report.
+8. Mid-block VAE attention (32.4 GMAC) is the last unmeasured rate; it is the only thing keeping `T_V`
+   a lower bound. Needs a GEMM rate at 6120 tokens × 384 ch on both engines.
+9. Phase 3 executors, Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
 

@@ -193,8 +193,8 @@ mismatches between two zero buffers" is not a pass.
 | `T_V` Mali, conv MACs | **12.256 s/chunk**, 417.5 GOPS, 100 % of conv MACs, 7/13 classes exact vs `conv8_ref` |
 | `T_V` mid-block attention (32.4 GMAC) | TBD — no measured rate on either engine (not a conv); `T_V` stays a **lower bound** on both branches |
 | Mali conv rate vs its own GEMM | 378–486 GOPS vs 877 GOPS — halo-staged activation tile is the next measurement (no number claimed) |
-| co-run `T_G` | TBD |
-| `k_b*` | TBD (blocked on the mid-block attention + co-run `T_G`) |
+| co-run `T_G` | **measured 2026-11-15 19:48** → `RESULTS_corun_tg.md`: no contention (GPU base block 0.1474 s co-run vs 0.1618 solo; NPU per-GEMM Δ ≤ 4 %) |
+| `k_b*` | **solved = 160** with `T_V` = 10.554 s (TPU decode): period 23.58 s, 5.40× vs NPU-only. 162 with the Mali decode. Still conditional on the mid-block attention term |
 
 ### Thermal-gate note (why `--gate-slack 1.0`)
 
