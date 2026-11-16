@@ -113,10 +113,26 @@ class Sim:
     def __init__(self, layers: list[dict], ops: list[tuple], max_layer: int,
                  shuffle: str = "wire", bias_mode: str = "per_tap",
                  round_mode: str = "per_tap", label: str = "wire",
-                 add_fp: tuple = (), cout_pc: bool = False, oracle: bool = False):
+                 add_fp: tuple = (), cout_pc: bool = False, oracle: bool = False,
+                 glue_fp: tuple = (), conv_out_fp: bool = False):
         self.layers, self.ops, self.max_layer = layers, ops, max_layer
         self.shuffle = shuffle
         self.bias_mode, self.round_mode, self.label = bias_mode, round_mode, label
+        # P3.18 arm `gluefp`: which GLUE hops are executed in float32 instead of being
+        # rounded to int8 at that op's own `out_sa`. `norm` covers NORMSILU/NORM/SILU,
+        # `add` the residual adds. Convs always stay int8 — that is the artifact.
+        self.glue_fp = set(glue_fp)
+        # P3.18 arm `convoutfp`: the conv still computes its taps and requant EXACTLY,
+        # but the result is kept as the fp32 value instead of being rounded to int8 at
+        # SA_out. Prices the conv's OUTPUT grid, which the glue arms cannot: they all
+        # still lose whatever the output hop lost.
+        self.conv_out_fp = conv_out_fp
+        # P3.18 instrumentation: the one-hop rounding cost of EVERY glue op, measured at
+        # the walk's own input (cos of the op's fp32 result vs its own requantised codes).
+        # It prices each op without needing a reference tensor at that site, so the
+        # `wire` arm's 101-op chain gets a per-op number instead of one end figure.
+        self.hops: list[dict] = []
+        self.last_gather_hop: float | None = None
         # P3.16 arms: `add_fp` = conv indices whose FOLLOWING residual add is done in
         # float32 (the int8 hop at the add is removed; the next quantisation, the
         # scale-invariant `norm_out`, then does the only rounding). `cout_pc` = give
@@ -185,6 +201,7 @@ class Sim:
         ih = np.arange(h) // 2 if spatial else np.arange(h)
         iw = np.arange(w) // 2 if spatial else np.arange(w)
         inb = np.zeros((fin, cin, h, w), dtype=np.int8)
+        dot = n1 = n2 = 0.0
         for t in range(fin):
             if t == 0:
                 srcf, half = 0, 0
@@ -193,10 +210,24 @@ class Sim:
             if srcf >= act.shape[0]:
                 continue
             sub = act[srcf][half * cin:(half + 1) * cin][:, ih][:, :, iw]
-            if g == 1.0 and L["wiring"] in (0, 1, 2, 5):
+            if g == 1.0 and L["wiring"] in (0, 1, 2, 5) and act.dtype == np.int8:
                 inb[t] = sub
+                q = sub
+                ideal = sub.astype(np.float32)
             else:
-                inb[t], _ = q_clamp(sub.astype(np.float64) * g)
+                ideal = sub.astype(np.float32) * np.float32(g)
+                q, _ = q_clamp(ideal)
+                inb[t] = q
+            # P3.18: the one-hop cost of BUILDING this conv's input — the exact fp32
+            # resample vs the int8 codes the conv actually consumes (the requant ratio
+            # `sa_prev/sa_in` is the whole cost; the mapping itself is P3.14's).
+            qf = q.astype(np.float32)
+            dot += float(np.sum(ideal * qf, dtype=np.float64))
+            n1 += float(np.sum(ideal * ideal, dtype=np.float64))
+            n2 += float(np.sum(qf * qf, dtype=np.float64))
+        self.last_gather_hop = (None if min(n1, n2) <= 0 else
+                                float(1.0 - dot / max(math.sqrt(n1 * n2), 1e-30)))
+        self.last_gather_g = float(g)
         return inb
 
     def gather(self, L: dict, sa_in: float) -> np.ndarray:
@@ -220,21 +251,35 @@ class Sim:
                 f"{L['name']}: wiring {L['wiring']} cannot build {fin}x{cin}x{h}x{w} from "
                 f"act {act.shape} (want f={want_f} c={want_c} h={want_h} w={want_w})")
         inb = np.zeros((fin, cin, h, w), dtype=np.int8)
+        dot = n1 = n2 = 0.0
         for t in range(fin):
             srcf = t // 2 if tshuf else t
             if srcf >= act.shape[0]:
                 continue                              # device: memset 0
             half = (t % 2) * cin if tshuf else 0
             sub = act[srcf][half:half + cin][:, ih][:, :, iw]
-            if L["wiring"] == 0 and g == 1.0:
+            if L["wiring"] == 0 and g == 1.0 and act.dtype == np.int8:
                 inb[t] = sub
+                q = sub
+                ideal = sub.astype(np.float32)
             else:
-                inb[t], _ = q_clamp(sub.astype(np.float64) * g)
+                ideal = sub.astype(np.float32) * np.float32(g)
+                q, _ = q_clamp(ideal)
+                inb[t] = q
+            qf = q.astype(np.float32)                # P3.18: the input build's own hop
+            dot += float(np.sum(ideal * qf, dtype=np.float64))
+            n1 += float(np.sum(ideal * ideal, dtype=np.float64))
+            n2 += float(np.sum(qf * qf, dtype=np.float64))
+        self.last_gather_hop = (None if min(n1, n2) <= 0 else
+                                float(1.0 - dot / max(math.sqrt(n1 * n2), 1e-30)))
+        self.last_gather_g = float(g)
         return inb
 
     def conv(self, li: int) -> dict:
         L = self.layers[li]
         ai = L["ai"]
+        self.last_gather_hop = None
+        self.last_gather_g = None
         sa_in = float(self.sain_override.get(ai, self.SAIN[ai]))
         sa_out = float(self.SAOUT[ai])
         sc = self.SC[L["sc_off"]:L["sc_off"] + L["cout"]]
@@ -271,6 +316,8 @@ class Sim:
         per_term = 127 * 127 * (2 * pad[0] + 1) * (2 * pad[1] + 1)
         step = max(1, int((2 ** 24) // max(1, per_term)))
         outb = np.zeros((L["frames"], L["cout"], L["h"], L["w"]), dtype=np.int8)
+        outf = (np.zeros((L["frames"], L["cout"], L["h"], L["w"]), dtype=np.float32)
+                if self.conv_out_fp else None)
         clamps = 0
         tap0_skipped = 0
         for f in range(L["frames"]):
@@ -303,16 +350,33 @@ class Sim:
                     acc += acc_t
                     if b:
                         bias_acc += bi_int.reshape(-1, 1, 1)
-            if self.round_mode == "per_tap":
-                q2, n2 = q_clamp(acc)
+            if self.conv_out_fp:
+                # No int8 hop at the conv's output: the value is kept as fp32 in value
+                # units. The CLAMP is kept (it is the artifact's deliberate range, 127
+                # codes) — only the rounding is removed, so this arm prices the grid's
+                # step and nothing else. NB `acc` is already in CODE units in per_tap
+                # mode (each tap was rounded to int8 before the sum).
+                if self.round_mode == "per_tap":
+                    qf = np.clip(acc, -127, 127).astype(np.float64)
+                else:
+                    qf = np.clip((acc + bias_acc).astype(np.float64) * req, -127.0, 127.0)
+                outf[f] = (qf * out_sa_use).astype(np.float32)
             else:
-                q2, n2 = q_clamp((acc + bias_acc).astype(np.float64) * req)
-            clamps += n2
-            outb[f] = q2.reshape(L["cout"], L["h"], L["w"])
+                if self.round_mode == "per_tap":
+                    q2, n2 = q_clamp(acc)
+                else:
+                    q2, n2 = q_clamp((acc + bias_acc).astype(np.float64) * req)
+                clamps += n2
+                outb[f] = q2.reshape(L["cout"], L["h"], L["w"])
         self.clamps += clamps
-        self.act = outb
-        self.sa = out_sa_use
-        self.sa_vec = sa_vec
+        if self.conv_out_fp:
+            self.act = outf
+            self.sa = 1.0
+            self.sa_vec = None
+        else:
+            self.act = outb
+            self.sa = out_sa_use
+            self.sa_vec = sa_vec
         self.last_conv = li
         self.hist.append((outb, out_sa_use, li))
         self.hist = self.hist[-3:]
@@ -320,7 +384,9 @@ class Sim:
         self.last_inb_name = L["name"]
         r = dict(idx=li, ai=ai, name=L["name"], shape=list(outb.shape), sa_out=out_sa_use,
                  sa_in=float(sa_in), oracle=bool(oi is not None),
-                 clamp=clamps / outb.size, scheme=self.label, tap0_skipped=tap0_skipped)
+                 clamp=clamps / outb.size, scheme=self.label, tap0_skipped=tap0_skipped,
+                 gather_hop=self.last_gather_hop, gather_g=self.last_gather_g,
+                 conv_out_fp=bool(self.conv_out_fp))
         if sa_vec is not None:
             r.update(pc=True, sa_out_pc=[float(v) for v in sa_vec])
         self.rec.append(r)
@@ -328,7 +394,7 @@ class Sim:
 
     # ---------------------------------------------------------------- the float ops
     def normsilu(self, goff: int, C: int, gam_scale: float, out_sa: float,
-                 do_norm: bool, do_silu: bool) -> None:
+                 do_norm: bool, do_silu: bool, kind: str = "NORMSILU") -> None:
         a = self.act
         assert a.shape[1] == C, f"norm C={C} vs act {a.shape[1]}"
         sain = np.float32(self.sa)
@@ -341,8 +407,27 @@ class Sim:
             y = x
         if do_silu:
             y = y / (np.float32(1.0) + np.exp(-y))
+        if "norm" in self.glue_fp:
+            # P3.18 `gluefp`: no int8 hop here — the float result IS the state (scale
+            # 1.0), so the next requant is the conv's input build and nothing else.
+            self.act = y
+            self.sa = 1.0
+            self.sa_vec = None
+            self.hops.append(dict(kind=kind, after_conv=self.last_conv, C=int(C),
+                                  sa_in=float(sain), out_sa=float(out_sa),
+                                  hop=None, clamp=None, fp=True))
+            return
         q, n = q_clamp(y / np.float32(out_sa))
         self.clamps += n
+        # P3.18: this op's own one-hop rounding cost, at the input it was handed.
+        qd = q.astype(np.float32) * np.float32(out_sa)
+        dot = float(np.sum(y * qd, dtype=np.float64))
+        n1 = float(np.sum(y * y, dtype=np.float64))
+        n2 = float(np.sum(qd * qd, dtype=np.float64))
+        self.hops.append(dict(kind=kind, after_conv=self.last_conv, C=int(C),
+                              sa_in=float(sain), out_sa=float(out_sa),
+                              hop=float(1.0 - dot / max(math.sqrt(n1 * n2), 1e-30)),
+                              clamp=float(n) / q.size, fp=False, elements=int(q.size)))
         self.act = q.reshape(a.shape)
         self.sa = float(out_sa)
         self.sa_vec = None
@@ -362,16 +447,32 @@ class Sim:
             self.act = (self.act.astype(np.float32) * np.float32(self.sa)
                         + s.astype(np.float32) * np.float32(s_sa))
             self.sa = 1.0
-            rec.update(fp=True, clamp=0.0)
+            rec.update(fp=True, clamp=0.0, hop=None)
+        elif "add" in self.glue_fp:
+            # P3.18 `gluefp`: the same, for every residual add.
+            self.act = (self.act.astype(np.float32) * np.float32(self.sa)
+                        + s.astype(np.float32) * np.float32(s_sa))
+            self.sa = 1.0
+            rec.update(fp=True, clamp=0.0, hop=None)
         else:
             v = (self.act.astype(np.float64) * self.sa + s.astype(np.float64) * s_sa) / out_sa
             q, n = q_clamp(v)
             self.clamps += n
+            qd = q.astype(np.float32) * np.float32(out_sa)
+            vf = v.astype(np.float32) * np.float32(out_sa)
+            dot = float(np.sum(vf * qd, dtype=np.float64))
+            n1 = float(np.sum(vf * vf, dtype=np.float64))
+            n2 = float(np.sum(qd * qd, dtype=np.float64))
+            rec.update(fp=False, clamp=n / q.size, elements=int(q.size),
+                       hop=float(1.0 - dot / max(math.sqrt(n1 * n2), 1e-30)))
             self.act = q.reshape(self.act.shape)
             self.sa = float(out_sa)
-            rec.update(fp=False, clamp=n / q.size)
         self.sa_vec = None
         self.adds.append(rec)
+        self.hops.append(dict(kind="ADD", after_conv=self.last_conv,
+                              sa_in=rec["sa_act"], out_sa=float(out_sa),
+                              ratio=rec["ratio"], hop=rec.get("hop"),
+                              clamp=rec.get("clamp"), fp=rec["fp"]))
 
     # ---------------------------------------------------------------- the walk
     def run(self, lat: np.ndarray, lat_sa: float) -> None:
@@ -393,9 +494,9 @@ class Sim:
                     raise SystemExit(f"LOAD of empty slot {op[1]}")
                 self.act, self.sa = s
             elif k in ("NORMSILU", "NORM"):
-                self.normsilu(op[1], op[2], op[3], op[4], True, k == "NORMSILU")
+                self.normsilu(op[1], op[2], op[3], op[4], True, k == "NORMSILU", kind=k)
             elif k == "SILU":
-                self.normsilu(0, self.act.shape[1], 1.0, op[1], False, True)
+                self.normsilu(0, self.act.shape[1], 1.0, op[1], False, True, kind="SILU")
             elif k == "ADD":
                 self.add(op[1], op[2])
 
@@ -599,7 +700,7 @@ def main() -> int:
     ap.add_argument("--device", default=None,
                     help="a dump_<ts> dir whose vae_dump.bin is the device's final decode")
     ap.add_argument("--shuffle", default="both", choices=["wire", "shift", "both"],
-                    help="temporal-upsample gather: `wire` = npu_block.cpp's (t//2, t%2); "
+                    help="temporal-upsample gather: `wire` = npu_block.cpp's (t//2, t%%2); "
                          "`shift` = the mapping measured off the reference's own conv input; "
                          "`both` measures them side by side")
     ap.add_argument("--schemes", default=None,
@@ -621,6 +722,17 @@ def main() -> int:
                          "the REFERENCE module's own input, quantised at the program's SA_in, so a "
                          "layer's cosine separates inherited error (input already wrong) from "
                          "intrinsic error (the conv/weights/scale at that site)")
+    ap.add_argument("--glue", action="store_true",
+                    help="P3.18a: price the GLUE hops, one class at a time. Arms: `wire` (validator), "
+                         "`gluefp` (every NORMSILU/NORM/SILU and every residual ADD executed in "
+                         "float32 — no int8 hop in the glue at all), `normfp` (norms only), `addfp` "
+                         "(adds only). Every arm also records the ONE-HOP cost of each glue op and "
+                         "of each conv's input build, measured at the input that op was handed")
+    ap.add_argument("--convout", action="store_true",
+                    help="P3.18b: price the conv's OUTPUT grid. Arms: `wire` (validator) and "
+                         "`convoutfp`, where every conv keeps its exact requant value in float32 "
+                         "instead of rounding it to int8 at SA_out (the taps, their per-tap int8 "
+                         "rounding and the input build are unchanged)")
     ap.add_argument("--out", default="vae_sim")
     args = ap.parse_args()
 
@@ -691,6 +803,23 @@ def main() -> int:
         # conv's INPUT changes.
         arms = [("wire", "shift", "per_tap", "per_tap", {}),
                 ("oracle", "shift", "per_tap", "per_tap", dict(oracle=True))]
+    elif args.glue:
+        # P3.18 — the glue hops, class by class. The convs are identical in all four
+        # arms; only which GLUE ops round to int8 changes, so the difference in the
+        # end product is that op class's contribution to the walk.
+        GARMS = {
+            "wire":   (),                 # validator: must reproduce P3.17 to the digit
+            "gluefp": ("norm", "add"),    # no int8 hop anywhere in the glue
+            "normfp": ("norm",),          # norm+SiLU hops removed, adds still int8
+            "addfp":  ("add",),           # residual adds in float32, norms still int8
+        }
+        arms = [(k, "shift", "per_tap", "per_tap", dict(glue_fp=v)) for k, v in GARMS.items()]
+    elif args.convout:
+        # P3.18b — the conv's output grid, alone. Everything the conv computes is
+        # identical up to the final requant; only whether that value is rounded to int8
+        # at SA_out changes.
+        arms = [("wire", "shift", "per_tap", "per_tap", {}),
+                ("convoutfp", "shift", "per_tap", "per_tap", dict(conv_out_fp=True))]
     else:
         modes = ["wire", "shift"] if args.shuffle == "both" else [args.shuffle]
         arms = [(m, m, "per_tap", "per_tap", {}) for m in modes]
@@ -701,13 +830,16 @@ def main() -> int:
     def run_arm(label: str, shuffle: str, bias_mode: str, round_mode: str,
                 lat_use: np.ndarray, lat_sa: float, tr_use: dict, out_use: torch.Tensor,
                 override: dict[int, float] | None = None, add_fp: tuple = (),
-                cout_pc: bool = False, oracle: bool = False) -> dict:
+                cout_pc: bool = False, oracle: bool = False, glue_fp: tuple = (),
+                conv_out_fp: bool = False) -> dict:
         log(f"--- arm {label}: gather={shuffle} bias={bias_mode} round={round_mode}"
             + (f" add_fp={add_fp}" if add_fp else "") + (" cout_pc=1" if cout_pc else "")
+            + (f" glue_fp={','.join(glue_fp)}" if glue_fp else "")
+            + (" convout_fp=1" if conv_out_fp else "")
             + (" oracle_input=1" if oracle else ""))
         s = Sim(layers, ops, args.max_layer, shuffle=shuffle, bias_mode=bias_mode,
                 round_mode=round_mode, label=label, add_fp=add_fp, cout_pc=cout_pc,
-                oracle=oracle)
+                oracle=oracle, glue_fp=glue_fp, conv_out_fp=conv_out_fp)
         if oracle:
             s.oracle_in = {n: (v["in_path"], tuple(v["in_shape"]))
                            for n, v in tr_use.items() if v.get("in_path")}
@@ -767,9 +899,10 @@ def main() -> int:
         fin_pc = final_metrics_pc(s.act, s.sa_vec, out_use) if s.sa_vec is not None else None
         finals[label] = (s.act.copy(), float(s.sa))
         res = dict(convs=rows, first_divergence=first_bad, total_clamps=int(s.clamps),
-                   final=fin, final_pc=fin_pc, adds=s.adds,
+                   final=fin, final_pc=fin_pc, adds=s.adds, hops=s.hops,
                    walk_s=time.time() - t0, bias=bias_mode, round=round_mode,
                    gather=shuffle, add_fp=list(add_fp), cout_pc=bool(cout_pc),
+                   glue_fp=list(glue_fp), conv_out_fp=bool(conv_out_fp),
                    worst=min((r for r in rows if r.get("cosine") is not None),
                              key=lambda r: r["cosine"], default={}))
         if fin_pc is not None:
@@ -848,11 +981,63 @@ def main() -> int:
             f"mean inherited {oracle_doc['mean_inherited'] * 100:.2f} pts, "
             f"{oracle_doc['sites_intrinsic_gt_1pct']}/{len(intr)} sites > 1 pt intrinsic")
 
+    # ------------------------------------------- P3.18: the glue hops, one at a time
+    glue_doc = None
+    if args.glue and "wire" in results:
+        w = results["wire"]
+        sites: list[dict] = []
+        for r in w["convs"]:
+            if r.get("gather_hop") is None:
+                continue
+            sites.append(dict(kind="INPUT-BUILD", after_conv=r["idx"], name=r["name"],
+                              sa_in=r["sa_in"], sa_out=r["sa_out"], g=r.get("gather_g"),
+                              hop=r["gather_hop"], clamp=None, fp=False))
+        for h in w["hops"]:
+            sites.append(dict(kind=h["kind"], after_conv=h["after_conv"],
+                              name=next((L["name"] for L in layers
+                                         if L["idx"] == h["after_conv"]), ""),
+                              sa_in=h.get("sa_in"), sa_out=h.get("out_sa"),
+                              g=h.get("ratio"), hop=h.get("hop"), clamp=h.get("clamp"),
+                              fp=bool(h.get("fp"))))
+        by: dict[str, dict] = {}
+        for s in sites:
+            b = by.setdefault(s["kind"], dict(n=0, hops=[], clamps=[], worst=None))
+            if s["hop"] is None:
+                continue
+            b["n"] += 1
+            b["hops"].append(s["hop"])
+            if s.get("clamp") is not None:
+                b["clamps"].append(s["clamp"])
+            if b["worst"] is None or s["hop"] > b["worst"]["hop"]:
+                b["worst"] = s
+        summary = {k: dict(n=v["n"], sum_pt=sum(v["hops"]) * 100,
+                           mean_pt=(sum(v["hops"]) / len(v["hops"]) * 100) if v["hops"] else None,
+                           max_pt=max(v["hops"]) * 100 if v["hops"] else None,
+                           worst_after_conv=(v["worst"] or {}).get("after_conv"),
+                           mean_clamp_pct=(sum(v["clamps"]) / len(v["clamps"]) * 100)
+                           if v["clamps"] else None)
+                   for k, v in by.items()}
+        glue_doc = dict(
+            sites=sites, by_class=summary,
+            arms={k: dict(final=results[k]["final"], glue_fp=results[k]["glue_fp"],
+                          total_clamps=results[k]["total_clamps"],
+                          worst=results[k].get("worst")) for k in results},
+            note="One-hop cost of each op = 1 - cos(fp32 result of the op, that result "
+                 "requantised to the op's own out_sa and dequantised again): what the int8 "
+                 "hop at that op costs, priced AT THE INPUT THE WALK HANDED IT. `INPUT-BUILD` "
+                 "= building a conv's input (temporal shuffle / 2x upsample + requant to that "
+                 "conv's SA_in). The class sums are not additive in dB — they rank the classes "
+                 "and locate the worst site; the arms are what price a class at the end product.")
+        for k, v in summary.items():
+            log(f"glue-hop {k:12s}: n={v['n']:3d} sum {v['sum_pt']:.2f} pt, mean "
+                f"{v['mean_pt']:.3f} pt, max {v['max_pt']:.3f} pt (after conv "
+                f"{v['worst_after_conv']})")
+
     ts = time.strftime("%Y%m%d_%H%M%S")
     labels = list(results)
     doc = dict(kind="vae_program_sim", timestamp=ts, wire=str(Path(args.wire).name),
                latent_dir=ddir.name, max_layer=args.max_layer, results=results,
-               post_quant_conv=pqc_doc, oracle=oracle_doc,
+               post_quant_conv=pqc_doc, oracle=oracle_doc, glue=glue_doc,
                note="cosine = the simulator's int8 codes vs the fp32 reference's own module "
                     "output quantised at the same SA_out; a collapse localizes the op between "
                     "the previous conv and this one. `final` = the walk's last codes "
@@ -979,6 +1164,47 @@ def main() -> int:
             md += ["", f"Layer 34 (`{l34['name']}`): input {l34['in_cos']:.6f}, wire output "
                    f"{l34['wire_cos']:.6f}, oracle output {l34['oracle_cos']:.6f} ⇒ intrinsic "
                    f"{l34['intrinsic'] * 100:.2f} pt, inherited {l34['inherited'] * 100:.2f} pt."]
+    if glue_doc:
+        g = glue_doc
+        md += ["", "## P3.18 — the glue, one hop at a time", "",
+               "Same convs, same weights, same per-tap scheme in every arm; the only thing that "
+               "changes is **which glue ops round to int8**. `gluefp` = every `NORMSILU` / `NORM` / "
+               "`SILU` and every residual `ADD` executed in float32 (the state then carries scale "
+               "1.0, so the next requant is the conv's own input build and nothing else); "
+               "`normfp` and `addfp` remove one class each.", "",
+               "| arm | glue in float32 | final PSNR (2.0) | cosine | rel-RMSE | worst conv | int8 clamps |",
+               "|---|---|---|---|---|---|---|"]
+        for lb in labels:
+            r = results[lb]
+            fin = r["final"]
+            w = r.get("worst") or {}
+            md.append(f"| **{lb}** | {'+'.join(r['glue_fp']) or '—'} | {fin['psnr_db']:.2f} dB | "
+                      f"{fin['cosine']:.6f} | {fin['rel_rmse'] * 100:.2f} % | "
+                      f"{w.get('idx')} ({w.get('cosine', float('nan')):.4f}) | {r['total_clamps']} |")
+        md += ["", "`wire` is the validator: it must reproduce P3.17 to the digit "
+               "(20.5876 dB / 0.888501 / worst layer 34 at 0.714915).", "",
+               "### What each hop costs, by class", "",
+               "`hop` = 1 − cos(fp32 result of the op, that same result requantised to the op's "
+               "own `out_sa`), priced **at the input the walk handed it**. `INPUT-BUILD` is the "
+               "conv's input construction (temporal shuffle / 2× upsample + requant to `SA_in`). "
+               "The sums are not additive in dB — they rank the classes and locate the worst site.", "",
+               "| class | ops | Σ hop (pt) | mean hop (pt) | max hop (pt) | worst after conv | mean clamp % |",
+               "|---|---|---|---|---|---|---|"]
+        for k, v in g["by_class"].items():
+            md.append(f"| {k} | {v['n']} | {v['sum_pt']:.2f} | {v['mean_pt']:.3f} | "
+                      f"{v['max_pt']:.3f} | {v['worst_after_conv']} | "
+                      + ("—" if v["mean_clamp_pct"] is None else f"{v['mean_clamp_pct']:.4f}")
+                      + " |")
+        md += ["", "### Every site, in walk order", "",
+               "| op | after conv | module | sa_in | sa_out | requant ratio | hop (pt) | clamp % |",
+               "|---|---|---|---|---|---|---|---|"]
+        for s in g["sites"]:
+            md.append(f"| {s['kind']} | {s['after_conv']} | "
+                      f"`{(s['name'] or '').split('decoder.')[-1]}` | {s['sa_in']:.5g} | "
+                      + ("—" if s["sa_out"] is None else f"{s['sa_out']:.5g}") + " | "
+                      + ("—" if s["g"] is None else f"{s['g']:.3f}") + " | "
+                      + ("— (fp32)" if s["hop"] is None else f"{s['hop'] * 100:.3f}") + " | "
+                      + ("—" if s["clamp"] is None else f"{s['clamp'] * 100:.4f}") + " |")
     mdp = OUT / f"{args.out}_{ts}.md"
     mdp.write_text("\n".join(md) + "\n", encoding="utf-8")
     print(f"\nwrote {js}\nwrote {mdp}")
