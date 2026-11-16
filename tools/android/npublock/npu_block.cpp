@@ -52,6 +52,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -691,7 +692,8 @@ static const float VAE_SA_NOMINAL = 1.0f / 127.0f;
 
 struct SeqTap   { int tap, delta, kh, kw; long long off, bytes; };
 struct SeqLayer { std::string name; int frames, fin, cout, cin, h, w, ntaps, wiring;
-                  long long sc_off; std::vector<SeqTap> taps; };
+                  long long sc_off; int ai = -1;          // ai = the ARTIFACT index
+                  std::vector<SeqTap> taps; };
 
 static std::vector<uint8_t> slurp(const char* p, const char* what) {
     std::vector<uint8_t> v;
@@ -736,9 +738,14 @@ static int load_seq(std::vector<SeqLayer>* out) {
 }
 
 // One CONV_2D graph: [1,H,W,Cin] -> [1,H,W,Cout], SAME padding, stride 1.
+// `sa` is the INPUT (and bias) scale, `sa_out` the output operand's scale. They
+// were the same value until P3.12: quantising the output at the consumer's
+// scale threw away resolution whenever the measured SA_out is smaller than
+// SA_in, and the decode's per-layer SA_out/SA_in spans 0.275..15.5.
 static int add_conv_op(Holder& h, ANeuralNetworksMemory* wmem, int H, int W, int Cin, int Cout,
                        int kh, int kw, long long woff, const float* sc, int pc,
-                       const int32_t* bias, float sa, uint32_t in, uint32_t* out, const char** why) {
+                       const int32_t* bias, float sa, float sa_out, uint32_t in,
+                       uint32_t* out, const char** why) {
     const uint32_t dF[4] = {(uint32_t)Cout, (uint32_t)kh, (uint32_t)kw, (uint32_t)Cin};
     const uint32_t dB[1] = {(uint32_t)Cout};
     const uint32_t dO[4] = {1u, (uint32_t)H, (uint32_t)W, (uint32_t)Cout};
@@ -751,7 +758,7 @@ static int add_conv_op(Holder& h, ANeuralNetworksMemory* wmem, int H, int W, int
     // per-channel bias scales from the input scale and the filter scales, so the
     // values must be scaled per output channel (sc[c]), not by sc[0].
     ANeuralNetworksOperandType tB = {ANEURALNETWORKS_TENSOR_INT32, 1, dB, sa * sw, 0};
-    ANeuralNetworksOperandType tO = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dO, sa, 0};
+    ANeuralNetworksOperandType tO = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED, 4, dO, sa_out, 0};
     ANeuralNetworksOperandType tS = {ANEURALNETWORKS_INT32, 0, nullptr, 0.0f, 0};
 
     uint32_t iF, iB, ipl, ipr, ipt, ipb, isw, ish, iact, io;
@@ -808,7 +815,7 @@ static int probe_conv_pc(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem
     uint32_t ia, io;
     int rc = add_operand(h, &tI, &ia, &why);
     if (!rc) rc = add_conv_op(h, wmem, H, W, Cin, Cout, 3, 3, 0, sc.data(), 1, bi.data(),
-                              VAE_SA_NOMINAL, ia, &io, &why);
+                              VAE_SA_NOMINAL, VAE_SA_NOMINAL, ia, &io, &why);
     if (!rc) { uint32_t ins[1] = {ia}, outs[1] = {io};
                ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs); }
     const int arc = rc;
@@ -993,7 +1000,7 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
                 }
                 if (add_operand(h, &tI, &ia, &why) ||
                     add_conv_op(h, wmem, L.h, L.w, L.cin, L.cout, T.kh, T.kw, T.off,
-                                lsc, use_pc, bi.data(), sa_in, ia, &io, &why)) { ok = false; break; }
+                                lsc, use_pc, bi.data(), sa_in, sa_in, ia, &io, &why)) { ok = false; break; }
                 uint32_t ins[1] = {ia}, outs[1] = {io};
                 ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs);
                 int frc = ANeuralNetworksModel_finish(h.m);
@@ -1114,6 +1121,479 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
     return 0;
 }
 
+// ================================================ convwire: the WIRED decode
+// `convseq` executed the 592 CONV_2D dispatches and left everything between them
+// unwired: no norm, no SiLU, no residual add, and its activation scale table was
+// indexed by POSITION in a storage order that `WanResidualBlock.forward` does not
+// follow. P3.11 measured what those ops are — a per-pixel `WanRMS_norm`
+// (F.normalize over channels * sqrt(C) * gamma) followed by SiLU between the two
+// convs of every resnet, 14 residual adds, 2 temporal shuffles, 3 2-D upsamples
+// and one mid-block attention — so this mode walks a LINEAR PROGRAM instead:
+//
+//   OP CONV <li>                              one artifact layer (taps + frames)
+//   OP SAVE <slot> / OP LOAD <slot>            int8 activation copies (residuals)
+//   OP NORMSILU <goff> <C> <scale> <out_sa>    one fused float pass
+//   OP NORM <goff> <C> <scale> <out_sa>        a norm with no SiLU after it
+//   OP SILU <out_sa>
+//   OP ADD <slot> <out_sa> <max_abs>
+//   OP SKIP <what>                             folded into a conv's gather, or the
+//                                              mid-block attention (not executed)
+//
+// The activation is int8 throughout at a declared per-tensor scale, so every
+// float op is one streaming pass and never a full float copy (the largest plane
+// is 9x96x272x480 = 112.8 MB int8, 4x that in f32). A conv's INPUT operand is at
+// the layer's measured SA_in and its OUTPUT operand at its measured SA_out —
+// those differ by 0.275..15.5x across the decode, so they are not
+// interchangeable, and quantising the output at the consumer's scale (what
+// `convseq` did) threw resolution away wherever SA_out < SA_in.
+static const char* VAE_WIRE_PATH = "/data/local/tmp/vae_wire.txt";
+static const char* VAE_SA2_PATH  = "/data/local/tmp/vae_sa2.f32";    // 2 x 36: SA_in ++ SA_out
+static const char* VAE_NM_PATH   = "/data/local/tmp/vae_norms.f32";  // 29 gammas, concatenated
+
+struct WireOp { int kind, a, b; long long goff; double p1, p2; };
+enum { W_CONV = 0, W_SAVE, W_LOAD, W_NORMSILU, W_NORM, W_SILU, W_ADD, W_SKIP };
+
+static int load_wire(std::vector<SeqLayer>* out, std::vector<WireOp>* prog) {
+    FILE* f = fopen(VAE_WIRE_PATH, "r");
+    if (!f) { P("FATAL|wire_open|%s", VAE_WIRE_PATH); return -1; }
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || line[0] == 10 || line[0] == 13) continue;
+        if (!strncmp(line, "LAYER ", 6)) {
+            SeqLayer L; char nm[192] = {0}; int idx = 0;
+            // LAYER <idx> <frames> <frames_in> <cout> <cin> <h> <w> <ntaps>
+            //       <wiring> <sc_off> <artifact_index> <name>
+            int n = sscanf(line + 6, "%d %d %d %d %d %d %d %d %d %lld %d %191s",
+                           &idx, &L.frames, &L.fin, &L.cout, &L.cin, &L.h, &L.w,
+                           &L.ntaps, &L.wiring, &L.sc_off, &L.ai, nm);
+            if (n < 12) { P("FATAL|wire_layer_parse|%s", line); fclose(f); return -1; }
+            L.name = nm;
+            out->push_back(L);
+        } else if (!strncmp(line, "TAP ", 4)) {
+            if (out->empty()) { P("FATAL|wire_tap_without_layer"); fclose(f); return -1; }
+            SeqTap t; int n = sscanf(line + 4, "%d %d %lld %lld %d %d",
+                                     &t.tap, &t.delta, &t.off, &t.bytes, &t.kh, &t.kw);
+            if (n < 6) { P("FATAL|wire_tap_parse|%s", line); fclose(f); return -1; }
+            out->back().taps.push_back(t);
+        } else if (!strncmp(line, "OP ", 3)) {
+            char k[24] = {0};
+            WireOp o;
+            memset(&o, 0, sizeof o);
+            if (sscanf(line + 3, "%23s", k) != 1) continue;
+            if (!strcmp(k, "CONV")) {
+                if (sscanf(line + 3, "%23s %d", k, &o.a) != 2) { fclose(f); return -1; }
+                o.kind = W_CONV;
+            } else if (!strcmp(k, "SAVE")) {
+                if (sscanf(line + 3, "%23s %d", k, &o.a) != 2) { fclose(f); return -1; }
+                o.kind = W_SAVE;
+            } else if (!strcmp(k, "LOAD")) {
+                if (sscanf(line + 3, "%23s %d", k, &o.a) != 2) { fclose(f); return -1; }
+                o.kind = W_LOAD;
+            } else if (!strcmp(k, "NORMSILU")) {
+                o.kind = W_NORMSILU;
+                if (sscanf(line + 3, "%23s %lld %d %lf %lf", k, &o.goff, &o.a, &o.p1, &o.p2) != 5) {
+                    fclose(f); return -1;
+                }
+            } else if (!strcmp(k, "NORM")) {
+                o.kind = W_NORM;
+                if (sscanf(line + 3, "%23s %lld %d %lf %lf", k, &o.goff, &o.a, &o.p1, &o.p2) != 5) {
+                    fclose(f); return -1;
+                }
+            } else if (!strcmp(k, "SILU")) {
+                o.kind = W_SILU;
+                if (sscanf(line + 3, "%23s %lf", k, &o.p1) != 2) { fclose(f); return -1; }
+            } else if (!strcmp(k, "ADD")) {
+                o.kind = W_ADD;
+                if (sscanf(line + 3, "%23s %d %lf %lf", k, &o.a, &o.p1, &o.p2) != 4) {
+                    fclose(f); return -1;
+                }
+            } else {
+                o.kind = W_SKIP;
+            }
+            prog->push_back(o);
+        }
+    }
+    fclose(f);
+    if (out->empty() || prog->empty()) { P("FATAL|wire_empty"); return -1; }
+    size_t taps = 0;
+    for (auto& L : *out) taps += L.taps.size();
+    P("WIRE|layers=%zu|taps=%zu|ops=%zu", out->size(), taps, prog->size());
+    return 0;
+}
+
+struct ActBuf {
+    std::vector<int8_t> d; int f = 0, c = 0, h = 0, w = 0; float sa = 0.0f; bool live = false;
+    void shape(int nf, int nc, int nh, int nw, float s) {
+        f = nf; c = nc; h = nh; w = nw; sa = s; live = true;
+        d.assign((size_t)f * (size_t)c * (size_t)h * (size_t)w, 0);
+    }
+};
+
+static int run_convwire(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
+                        int max_convs, int pcmode) {
+    const char* why = "";
+    std::vector<SeqLayer> planrec;
+    std::vector<WireOp> prog;
+    if (load_wire(&planrec, &prog)) { P("FATAL|wire_load"); P("DONE"); return 2; }
+    const int nlay = (int)planrec.size();
+
+    std::vector<uint8_t> scraw = slurp(VAE_SC_PATH, "scales");
+    std::vector<uint8_t> biraw = slurp(VAE_BI_PATH, "bias");
+    std::vector<uint8_t> sa2raw = slurp(VAE_SA2_PATH, "sa2");
+    std::vector<uint8_t> nmraw = slurp(VAE_NM_PATH, "norms");
+    if (scraw.empty() || biraw.empty() || sa2raw.empty() || nmraw.empty()) { P("DONE"); return 2; }
+    const float* SC = (const float*)scraw.data();
+    const float* BI = (const float*)biraw.data();
+    const float* SA2 = (const float*)sa2raw.data();
+    const float* NM = (const float*)nmraw.data();
+    const size_t nsc = scraw.size() / 4, nbi = biraw.size() / 4;
+    const size_t nsa = sa2raw.size() / 4, ngam = nmraw.size() / 4;
+    if (nsa != 2 * (size_t)nlay) {
+        P("FATAL|wire_sa2_len|floats=%zu|layers=%d", nsa, nlay); P("DONE"); return 2;
+    }
+    // The artifact index must be a PERMUTATION: it is what the SA / weight-scale /
+    // bias tables are indexed by, so a duplicate would silently apply one layer's
+    // calibration to another.
+    std::vector<int> seen(nlay, 0);
+    for (auto& L : planrec) {
+        if (L.ai < 0 || L.ai >= nlay || seen[L.ai]++) {
+            P("FATAL|wire_ai_not_permutation|layer=%s|ai=%d", L.name.c_str(), L.ai);
+            P("DONE"); return 2;
+        }
+    }
+    P("WIRE|sa2=table|in=%.6g..%.6g|out=%.6g..%.6g|gammas=%zu",
+      (double)*std::min_element(SA2, SA2 + nlay), (double)*std::max_element(SA2, SA2 + nlay),
+      (double)*std::min_element(SA2 + nlay, SA2 + 2 * nlay),
+      (double)*std::max_element(SA2 + nlay, SA2 + 2 * nlay), ngam);
+
+    if (pcmode < 0) {
+        pcmode = probe_conv_pc(tpu, wmem);
+        P("NOTE|convwire_pc_mode=%d", pcmode);
+    }
+
+    ActBuf act, slot[2];
+    int64_t convs = 0, execs = 0, macs = 0, compile_ns = 0, tapfails = 0, pcfb = 0;
+    int64_t prep_ns = 0, epi_ns = 0, silk_ns = 0, add_ns = 0, slot_ns = 0;
+    int64_t clamps = 0, el_norm = 0, el_add = 0;
+    double conv_ms_total = 0.0;
+    int started = 0;
+    int64_t run0 = now_ns();
+
+    for (size_t pi = 0; pi < prog.size(); ++pi) {
+        const WireOp& op = prog[pi];
+        if (max_convs > 0 && started >= max_convs && op.kind == W_CONV) break;
+        if (op.kind == W_SKIP) continue;
+
+        if (op.kind == W_SAVE || op.kind == W_LOAD) {
+            ActBuf& s = slot[op.a & 1];
+            const int64_t t0 = now_ns();
+            if (op.kind == W_SAVE) {
+                if (!act.live) { P("FATAL|wire_save_no_act"); P("DONE"); return 5; }
+                if (s.d.size() != act.d.size()) s.shape(act.f, act.c, act.h, act.w, act.sa);
+                else { s.f = act.f; s.c = act.c; s.h = act.h; s.w = act.w; s.sa = act.sa; s.live = true; }
+                memcpy(s.d.data(), act.d.data(), act.d.size());
+            } else {
+                if (!s.live) { P("FATAL|wire_load_empty_slot|slot=%d", op.a); P("DONE"); return 5; }
+                act.shape(s.f, s.c, s.h, s.w, s.sa);
+                memcpy(act.d.data(), s.d.data(), s.d.size());
+            }
+            slot_ns += now_ns() - t0;
+            continue;
+        }
+
+        if (op.kind == W_NORMSILU || op.kind == W_NORM || op.kind == W_SILU) {
+            if (!act.live) { P("FATAL|wire_norm_no_act"); P("DONE"); return 5; }
+            const int C = (op.kind == W_SILU) ? act.c : op.a;
+            if (C != act.c) {
+                P("FATAL|wire_norm_C|kind=%d|C=%d|act=%d", op.kind, C, act.c); P("DONE"); return 5;
+            }
+            const double out_sa = (op.kind == W_SILU) ? op.p1 : op.p2;
+            if (!(out_sa > 0.0)) { P("FATAL|wire_norm_sa|%.9g", out_sa); P("DONE"); return 5; }
+            const bool do_norm = (op.kind != W_SILU);
+            const bool do_silu = (op.kind != W_NORM);
+            const float gam_scale = (float)op.p1;          // sqrt(C), as the exporter wrote it
+            const float* gam = do_norm ? (NM + op.goff) : nullptr;
+            if (do_norm && (size_t)op.goff + (size_t)C > ngam) {
+                P("FATAL|wire_norm_gamma_range|goff=%lld|C=%d|ngam=%zu", op.goff, C, ngam);
+                P("DONE"); return 5;
+            }
+            const float sain = act.sa;
+            const size_t plane = (size_t)act.h * (size_t)act.w;
+            const int64_t t0 = now_ns();
+            for (int f = 0; f < act.f; ++f) {
+                for (size_t i = 0; i < plane; ++i) {
+                    int8_t* p = &act.d[((size_t)f * plane + i) * (size_t)C];
+                    float den = 1.0f;
+                    if (do_norm) {
+                        float ss = 0.0f;
+                        for (int c = 0; c < C; ++c) {
+                            const float x = (float)p[c] * sain;
+                            ss += x * x;
+                        }
+                        const float nr = sqrtf(ss);
+                        den = nr > 1e-12f ? nr : 1e-12f;   // F.normalize's clamp_min(eps)
+                    }
+                    for (int c = 0; c < C; ++c) {
+                        float y = (float)p[c] * sain / den;
+                        if (do_norm) y = y * gam_scale * gam[c];
+                        if (do_silu) y = y / (1.0f + expf(-y));
+                        const long q = (long)lroundf(y / (float)out_sa);
+                        if (q > 127) { clamps++; p[c] = 127; }
+                        else if (q < -127) { clamps++; p[c] = -127; }
+                        else p[c] = (int8_t)q;
+                    }
+                    el_norm += C;
+                }
+            }
+            act.sa = (float)out_sa;
+            silk_ns += now_ns() - t0;
+            continue;
+        }
+
+        if (op.kind == W_ADD) {
+            ActBuf& s = slot[op.a & 1];
+            if (!act.live || !s.live || s.d.size() != act.d.size()) {
+                P("FATAL|wire_add_shape|slot=%d|act=%zu|slot_n=%zu", op.a, act.d.size(), s.d.size());
+                P("DONE"); return 5;
+            }
+            const double out_sa = op.p1;
+            const double ka = (double)act.sa, ks = (double)s.sa;
+            const int64_t t0 = now_ns();
+            for (size_t i = 0; i < act.d.size(); ++i) {
+                const double v = ((double)act.d[i] * ka + (double)s.d[i] * ks) / out_sa;
+                const long q = (long)(v >= 0 ? v + 0.5 : v - 0.5);
+                if (q > 127) { clamps++; act.d[i] = 127; }
+                else if (q < -127) { clamps++; act.d[i] = -127; }
+                else act.d[i] = (int8_t)q;
+            }
+            act.sa = (float)out_sa;
+            el_add += (int64_t)act.d.size();
+            add_ns += now_ns() - t0;
+            continue;
+        }
+
+        // ------------------------------------------------------------ W_CONV
+        ++started;
+        SeqLayer& L = planrec[op.a];
+        const int ai = L.ai;
+        const float sa_in = SA2[ai], sa_out = SA2[nlay + ai];
+        if (!(sa_in > 0.0f) || !(sa_out > 0.0f)) {
+            P("FATAL|wire_conv_sa|layer=%d|in=%.9g|out=%.9g", (int)op.a, (double)sa_in, (double)sa_out);
+            P("DONE"); return 5;
+        }
+        if (L.ntaps != (int)L.taps.size()) {
+            P("FATAL|wire_tap_count|layer=%d|%s|declared=%d|read=%zu", (int)op.a,
+              L.name.c_str(), L.ntaps, L.taps.size());
+            P("DONE"); return 5;
+        }
+        const size_t plane_in = (size_t)L.h * L.w * L.cin;
+        const size_t plane_out = (size_t)L.h * L.w * L.cout;
+        if (L.sc_off < 0 || (size_t)L.sc_off + (size_t)L.cout > nsc ||
+            (size_t)L.sc_off + (size_t)L.cout > nbi) {
+            P("FATAL|wire_scale_range|layer=%d|off=%lld|cout=%d", (int)op.a, L.sc_off, L.cout);
+            P("DONE"); return 5;
+        }
+        const float* lsc = SC + L.sc_off;
+        const float* lbi = BI + L.sc_off;
+
+        // ---- build this layer's input codes at its own SA_in. The shuffle and
+        // the 2x nearest upsample the plan lists as separate ops live here: they
+        // are a re-layout of this conv's input, not a new tensor.
+        std::vector<int8_t> inb((size_t)L.fin * plane_in, 0);
+        const int64_t p0 = now_ns();
+        if (L.wiring == 3) {
+            uint32_t x = 0x9E3779B9u;                 // the decode's synthetic latent
+            for (size_t i = 0; i < inb.size(); ++i) {
+                x = x * 1664525u + 1013904223u;
+                inb[i] = (int8_t)((x >> 24) & 0xFF);
+            }
+        } else {
+            if (!act.live) { P("FATAL|wire_conv_no_act|layer=%d", (int)op.a); P("DONE"); return 5; }
+            const int c = L.cin;
+            const bool tshuf = (L.wiring == 1 || L.wiring == 2);
+            const bool spatial = (L.wiring == 2 || L.wiring == 5);
+            const int want_f = tshuf ? (2 * act.f - 1) : act.f;
+            const int want_c = tshuf ? 2 * c : c;
+            const int want_h = spatial ? 2 * act.h : act.h;
+            const int want_w = spatial ? 2 * act.w : act.w;
+            if (want_f != L.fin || want_c != act.c || want_h != L.h || want_w != L.w) {
+                P("FATAL|wire_wiring_mismatch|layer=%d|%s|wiring=%d|want f=%d c=%d h=%d w=%d|"
+                  "act f=%d c=%d h=%d w=%d", (int)op.a, L.name.c_str(), L.wiring,
+                  L.fin, want_c, L.h, L.w, act.f, act.c, act.h, act.w);
+                P("DONE"); return 5;
+            }
+            const double g = (double)act.sa / (double)sa_in;
+            const bool plain = (g == 1.0) && (L.wiring == 0);
+            for (int t = 0; t < L.fin; ++t) {
+                const int srcf = tshuf ? (t / 2) : t;
+                const int half = tshuf ? (t % 2) : 0;
+                for (int hh = 0; hh < L.h; ++hh) {
+                    const int sh = spatial ? (hh / 2) : hh;
+                    for (int ww = 0; ww < L.w; ++ww) {
+                        const int sw = spatial ? (ww / 2) : ww;
+                        int8_t* dst = &inb[((size_t)t * L.h * L.w + (size_t)hh * L.w + ww) * (size_t)c];
+                        if (srcf >= act.f) { memset(dst, 0, (size_t)c); continue; }
+                        const int8_t* src = &act.d[((size_t)srcf * act.h * act.w +
+                                                   (size_t)sh * act.w + sw) * (size_t)act.c +
+                                                  (size_t)half * c];
+                        if (plain) { memcpy(dst, src, (size_t)c); continue; }
+                        for (int k = 0; k < c; ++k) {
+                            const double v = (double)src[k] * g;
+                            long q = (long)(v >= 0 ? v + 0.5 : v - 0.5);
+                            if (q > 127) q = 127;
+                            if (q < -127) q = -127;
+                            dst[k] = (int8_t)q;
+                        }
+                    }
+                }
+            }
+        }
+        const int64_t prep_this = now_ns() - p0;
+        prep_ns += prep_this;
+
+        // ---- one graph per tap, then frames x taps
+        std::vector<ANeuralNetworksCompilation*> comps;
+        std::vector<Holder> holders(L.taps.size());
+        int use_pc = pcmode;
+        const int64_t c0 = now_ns();
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            bool ok = true;
+            for (size_t ti = 0; ti < L.taps.size(); ++ti) {
+                const SeqTap& T = L.taps[ti];
+                Holder& h = holders[ti];
+                uint32_t ia, io;
+                if (ANeuralNetworksModel_create(&h.m)) { ok = false; break; }
+                const uint32_t dI[4] = {1u, (uint32_t)L.h, (uint32_t)L.w, (uint32_t)L.cin};
+                ANeuralNetworksOperandType tI = {ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED,
+                                                 4, dI, sa_in, 0};
+                std::vector<int32_t> bi((size_t)L.cout, 0);
+                for (int c = 0; c < L.cout; ++c) {
+                    const double den = (double)sa_in * (double)lsc[c];
+                    if (!(den > 0.0)) continue;
+                    const double v = (double)lbi[c] / den;
+                    bi[c] = (int32_t)(v > 2147483000.0 ? 2147483000.0
+                                     : (v < -2147483000.0 ? -2147483000.0 : v));
+                }
+                if (add_operand(h, &tI, &ia, &why) ||
+                    add_conv_op(h, wmem, L.h, L.w, L.cin, L.cout, T.kh, T.kw, T.off,
+                                lsc, use_pc, bi.data(), sa_in, sa_out, ia, &io, &why)) {
+                    ok = false; break;
+                }
+                uint32_t ins[1] = {ia}, outs[1] = {io};
+                ANeuralNetworksModel_identifyInputsAndOutputs(h.m, 1, ins, 1, outs);
+                const int frc = ANeuralNetworksModel_finish(h.m);
+                if (frc) {
+                    P("FATAL|wire_finish|layer=%d|%s|rc=%d(%s)", (int)op.a, L.name.c_str(),
+                      frc, rcs(frc));
+                    ok = false; break;
+                }
+                ANeuralNetworksCompilation* comp = nullptr;
+                int crc = ANeuralNetworksCompilation_createForDevices(h.m, &tpu, 1, &comp);
+                if (!crc) {
+                    ANeuralNetworksCompilation_setPreference(comp, ANEURALNETWORKS_PREFER_SUSTAINED_SPEED);
+                    crc = ANeuralNetworksCompilation_finish(comp);
+                }
+                if (crc) {
+                    P("CSCOMPILE|layer=%d|%s|pc=%d|rc=%d(%s)", (int)op.a, L.name.c_str(),
+                      use_pc, crc, rcs(crc));
+                    if (comp) ANeuralNetworksCompilation_free(comp);
+                    ok = false; break;
+                }
+                comps.push_back(comp);
+            }
+            if (ok) break;
+            for (auto* c : comps) ANeuralNetworksCompilation_free(c);
+            comps.clear();
+            for (auto& h : holders) { if (h.m) { ANeuralNetworksModel_free(h.m); h.m = nullptr; } }
+            if (use_pc == 0) { tapfails++; break; }
+            use_pc = 0; pcfb++;
+            P("NOTE|convwire_layer_pc_fallback|layer=%d|%s", (int)op.a, L.name.c_str());
+        }
+        compile_ns += now_ns() - c0;
+        if ((int)comps.size() != (int)L.taps.size()) {
+            for (auto* c : comps) ANeuralNetworksCompilation_free(c);
+            P("FATAL|wire_no_graph|layer=%d|%s|compiled=%zu/%zu", (int)op.a, L.name.c_str(),
+              comps.size(), L.taps.size());
+            P("DONE"); return 6;
+        }
+
+        std::vector<int8_t> outb((size_t)L.frames * plane_out, 0);
+        std::vector<int32_t> acc(plane_out, 0);
+        std::vector<int8_t> inp(plane_in, 0), zero(plane_in, 0), opb(plane_out, 0);
+        const int64_t lay0 = now_ns();
+        int64_t layexec = 0, layepi = 0, layclamp = 0;
+        for (int f = 0; f < L.frames; ++f) {
+            std::fill(acc.begin(), acc.end(), 0);
+            for (size_t ti = 0; ti < L.taps.size(); ++ti) {
+                const SeqTap& T = L.taps[ti];
+                const int src = f - T.delta;
+                if (src >= 0 && src < L.fin) memcpy(inp.data(), &inb[(size_t)src * plane_in], plane_in);
+                else                          memcpy(inp.data(), zero.data(), plane_in);
+
+                ANeuralNetworksExecution* ex = nullptr;
+                int rc = ANeuralNetworksExecution_create(comps[ti], &ex);
+                if (rc) { P("FATAL|wire_exec_create|rc=%d(%s)", rc, rcs(rc)); P("DONE"); return 8; }
+                ANeuralNetworksExecution_setInput(ex, 0, nullptr, inp.data(), inp.size());
+                ANeuralNetworksExecution_setOutput(ex, 0, nullptr, opb.data(), opb.size());
+                const int64_t t0 = now_ns();
+                const int erc = ANeuralNetworksExecution_compute(ex);
+                const int64_t t1 = now_ns();
+                ANeuralNetworksExecution_free(ex);
+                if (erc) { P("FATAL|wire_compute|layer=%d|tap=%d|frame=%d|rc=%d(%s)",
+                             (int)op.a, T.tap, f, erc, rcs(erc)); P("DONE"); return 8; }
+                P("TS|convwire|l=%d|t=%d|f=%d|t0=%.3f|t1=%.3f|ms=%.3f",
+                  (int)op.a, T.tap, f, (double)t0 / 1e6, (double)t1 / 1e6, (t1 - t0) / 1e6);
+                execs++; layexec++;
+                for (size_t i = 0; i < plane_out; ++i) acc[i] += (int32_t)opb[i];
+            }
+            // Each tap's int8 output is ALREADY at this layer's SA_out (the output
+            // operand carries it), so the summed int32 IS in SA_out units: clamp
+            // and store, no rescale. Saturation is counted, never hidden.
+            int8_t* dst = &outb[(size_t)f * plane_out];
+            const int64_t e0 = now_ns();
+            for (size_t i = 0; i < plane_out; ++i) {
+                const int32_t a = acc[i];
+                if (a > 127) { dst[i] = 127; layclamp++; }
+                else if (a < -127) { dst[i] = -127; layclamp++; }
+                else dst[i] = (int8_t)a;
+            }
+            layepi += now_ns() - e0;
+        }
+        const double layms = (now_ns() - lay0) / 1e6;
+        int64_t lmacs = 0;
+        for (auto& T : L.taps)
+            lmacs += (int64_t)L.h * L.w * L.cout * L.cin * T.kh * T.kw * (int64_t)L.frames;
+        macs += lmacs; convs++;
+        epi_ns += layepi;
+        clamps += layclamp;
+        conv_ms_total += layms;
+        P("CWLAYER|layer=%d|ai=%d|name=%s|frames=%d|taps=%zu|executes=%lld|conv_ms=%.1f|"
+          "prep_ms=%.1f|epi_ms=%.1f|macs=%lld|gops=%.1f|pc=%d|sa_in=%.6g|sa_out=%.6g|clamp=%.4f",
+          (int)op.a, ai, L.name.c_str(), L.frames, L.taps.size(), (long long)layexec, layms,
+          (double)prep_this / 1e6, layepi / 1e6, (long long)lmacs,
+          2.0 * (double)lmacs / (layms / 1000.0) / 1e9, use_pc, (double)sa_in, (double)sa_out,
+          (double)layclamp / (double)((int64_t)L.frames * (int64_t)plane_out));
+
+        for (auto* c : comps) ANeuralNetworksCompilation_free(c);
+        for (auto& h : holders) { if (h.m) { ANeuralNetworksModel_free(h.m); h.m = nullptr; } }
+
+        act.shape(L.frames, L.cout, L.h, L.w, sa_out);
+        memcpy(act.d.data(), outb.data(), outb.size());
+    }
+
+    const double total_s = (now_ns() - run0) / 1e9;
+    P("SUMMARY|mode=convwire|convs=%lld|executes=%lld|compile_s=%.2f|conv_ms=%.1f|"
+      "silk_ms=%.1f|add_ms=%.1f|prep_ms=%.1f|epi_ms=%.1f|slot_ms=%.1f|wall_s=%.3f|"
+      "macs=%lld|pc=%d|pc_fallbacks=%lld|tap_failures=%lld|clamp=%.4f|el_norm=%lld|el_add=%lld",
+      (long long)convs, (long long)execs, compile_ns / 1e9, conv_ms_total,
+      silk_ns / 1e6, add_ns / 1e6, prep_ns / 1e6, epi_ns / 1e6, slot_ns / 1e6, total_s,
+      (long long)macs, pcmode, (long long)pcfb, (long long)tapfails,
+      100.0 * (double)clamps / (double)std::max<int64_t>(1, el_norm + el_add),
+      (long long)el_norm, (long long)el_add);
+    P("DONE");
+    return 0;
+}
+
 // -------------------------------------------------------------------- runner
 struct RunCfg { int M; int tiles; int iters; };
 
@@ -1201,7 +1681,7 @@ int main(int argc, char** argv) {
         if (ensure_attn_blob(&why)) { P("FATAL|attn_weights|%s", why); P("DONE"); return 2; }
         wpath = W_ATTN_PATH;
         wbytes = ATTN_BYTES;
-    } else if (strcmp(mode, "convseq") == 0) {
+    } else if (strcmp(mode, "convseq") == 0 || strcmp(mode, "convwire") == 0) {
         // the VAE decoder's real INT8 artifact — no LCG fill, no second copy
         struct stat st;
         if (stat(VAE_W_PATH, &st) != 0 || st.st_size <= 0) {
@@ -1229,6 +1709,15 @@ int main(int argc, char** argv) {
         const int pcmode     = (argc > 3) ? atoi(argv[3]) : -1;  // -1 = probe first
         P("CONVSEQ|max_layers=%d|pc=%d|wbytes=%lld", max_layers, pcmode, (long long)wbytes);
         return run_convseq(tpu, wmem, max_layers, pcmode);
+    }
+
+    // mode=convwire <max_convs> <pc>: the WIRED decode — the same 592 CONV_2D
+    // dispatches, with the P3.11 norm/SiLU/add/shuffle program between them.
+    if (strcmp(mode, "convwire") == 0) {
+        const int max_convs = (argc > 2) ? atoi(argv[2]) : 0;    // 0 = all 36
+        const int pcmode    = (argc > 3) ? atoi(argv[3]) : -1;   // -1 = probe first
+        P("CONVWIRE|max_convs=%d|pc=%d|wbytes=%lld", max_convs, pcmode, (long long)wbytes);
+        return run_convwire(tpu, wmem, max_convs, pcmode);
     }
 
     // mode=conv <tiles> <iters> <N> <H> <W> <Cin> <Cout> <k> — one CONV_2D op,
