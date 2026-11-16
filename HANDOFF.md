@@ -1,5 +1,34 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
+*Updated 2026-11-16 (10:51, **P3.18 — every rounding hop in the decode is worth ≤ 0.013 dB, so the
+"13.75 dB of glue" P3.17's arithmetic implied does not exist as glue.** Host-only, **no device run
+and no device rate touched**: new arms in `vae_sim.py` (`--glue`, `--convout`) + per-hop
+instrumentation on all 79 glue sites, and a new instrument `tools/npu/vae_gather_probe.py` (P3.19).
+**Validator: `wire` reproduces P3.17 to the digit** (20.5876 dB / 0.888501 / conv 34 at 0.714915).
+Four measurements. (1) **`gluefp`** — every `NORMSILU`/`NORM`/`SILU` and every residual `ADD`
+executed in float32 — **20.6010 dB / 0.888720 = +0.013 dB**; `normfp` +0.001, `addfp` +0.014. (2)
+**`convoutfp`** — the conv's output kept exact in fp32 (clamp kept) — gives **bit-identical final
+codes** (0.8885014653205872) and per-layer cosines that differ only in the 11th digit: the conv's
+output rounding is *absorbed* by the next op's requant at every layer. (3) **The one-hop census**
+(79 sites, priced at the input each op was handed): conv `INPUT-BUILD` **Σ 0.0035 pt** (the
+artifact's `SA_in` already equals the producer's `SA_out`, ratio 1.000 at 35/36 sites),
+`NORMSILU` **Σ 1.746 pt** of which **0.529 pt is ONE site** — after conv 3, where 0.97 % of the
+post-SiLU codes clamp on a grid 15× finer than its input (a `calibrate.py` cone of shame, measured
+not applied), `ADD` **Σ 0.211 pt**. (4) **The input-build probe at a clean state** (rebuild each
+conv's input from the PREVIOUS conv's reference codes, so drift is removed by construction):
+`12→13` **1.000000, 0 % of codes differ** — the method validates; `11→12` 0.971035 and `20→21`
+0.976613, but **4 of 9 frames are bit-exact and the loss is frame-0-shaped (0.8881, |Δ| 13.6
+codes, decaying to 1.0000)** ⇒ that residual is the already-open streaming-vs-whole-sequence
+`time_conv` gap, **not** the shuffle wiring. `T_V` 8.908 s, `T_N` exact 0.8905 s/block, `k_b*` 165
+untouched. → `docs/device/RESULTS_vae_hops.md` (note: `RESULTS_vae_glue.md` is still P3.14's file),
+captures `vae_glue_20261116_102817`, `vae_convout_20261116_104708`, `vae_gather2_20261116_105111`.*
+**NEXT ACTION, in order: (a) the RESTART CENSUS** — restart the walk from the reference's own state
+after conv 11 / 20 / 27 and score the end product, to localise *where* the drift is generated
+instead of testing one op class at a time (3 host-only arms, ~12 min, no device); **(b)** store the
+streaming `time_conv` tensors alongside P3.17's rebuild and re-run the gather probe so the two
+shuffle rows stop carrying that confound; **(c)** the student's two calls still open — the missing
+`post_quant_conv` (+7.32 dB, P3.15) and the conv-3 norm's 0.97 % clamp, both of which edit
+`artifacts/vae` / `act_scales2_f32.bin`; **(d)** `proc_b --decode 1` → Gate 5.
 *Updated 2026-11-16 (10:12, **P3.17 — the decode's error is 100 % INHERITED: every one of the 36
 convs is faithful on a good input (mean 0.14 pt of cosine, worst 0.46), and layer 34 is
 exonerated (0.09 pt intrinsic vs 15.18 pt inherited).** Host-only, **no device run and no device
@@ -708,6 +737,18 @@ simulator, no device needed — **DONE 08:33, see P3.15 at the top**: two are wo
    intrinsic-bad ⇒ the site (weights/scale/gather), input-inherited ⇒ upstream. Host-only,
    one walk (~3.5 min), extends `vae_sim.py` with `--oracle`; the reference trace already
    dumps a conv input for the two `resample.1` layers, so this generalises an existing hook.
+   **DONE 10:12 (P3.17): every conv is faithful on a good input (mean intrinsic 0.143 pt of
+   cosine, 0/36 sites > 1 pt); layer 34 is exonerated (0.09 pt intrinsic vs 15.18 pt inherited).**
+12. **NEXT ACTION — the restart census (P3.20).** P3.18 priced every rounding hop in the walk and
+   they are all ≤ 0.013 dB *together* (`RESULTS_vae_hops.md`), and P3.19 showed the one
+   conv→conv input build that can be checked at a clean state is exact (`12→13` 1.000000) while
+   the two shuffle rows carry the streaming-`time_conv` confound. So the drift's *origin* is what
+   is unmeasured. Restart the walk from the reference's own state after conv 11 / 20 / 27 (3
+   host-only arms, ~12 min, no device, `--restart-after N`) and score the end product: a restart
+   that recovers ~34 dB proves the loss is generated upstream of that point. Then (b) store the
+   streaming `time_conv` tensors alongside P3.17's whole-sequence rebuild and re-run
+   `vae_gather_probe.py` so the shuffle rows are attributable; (c) the two student calls
+   (`post_quant_conv` +7.32 dB, the conv-3 norm's 0.97 % clamp); (d) `proc_b --decode 1` → Gate 5.
 
 ## Decisions already locked (do not reopen without saying why)
 
