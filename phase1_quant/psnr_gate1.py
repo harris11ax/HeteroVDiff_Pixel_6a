@@ -140,6 +140,11 @@ def main() -> int:
     ap.add_argument("--skip-worst", type=int, default=0,
                     help="also run a second config with the N lowest-weight-cosine layers left in "
                          "fp32, to attribute the end-to-end loss to specific layers")
+    ap.add_argument("--act-scales", default=None,
+                    help="artifacts/calib/act_scales_vae_*.json from calibrate.py: also run a "
+                         "decode with INT8 ACTIVATIONS at the measured per-layer SA, which is the "
+                         "device's real operand path (weight-only is the bar Gate 1 asked for; "
+                         "this is the number that lives beside it)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -194,6 +199,41 @@ def main() -> int:
 
     original = {name: params[name].detach().clone() for name in rebuilt}   # pristine fp32, BEFORE patching
 
+    # ---- optional: INT8 ACTIVATIONS at the measured SA (calibrate.py). The device's
+    # operands are INT8 on both sides; this config prices the activation half, which
+    # weight-only quantise-dequantise deliberately leaves out.
+    act_sa: dict[str, float] = {}
+    if args.act_scales:
+        ap_path = Path(args.act_scales)
+        if not ap_path.is_absolute():
+            ap_path = REPO / ap_path
+        cal = json.loads(ap_path.read_text(encoding="utf-8"))
+        act_sa = {r["layer"]: float(r["sa"]) for r in cal["layers"] if r.get("sa")}
+        have = {L["name"] for L in man["layers"]}
+        if set(act_sa) != have:
+            raise SystemExit(f"act scales cover {len(act_sa)} layers, artifact has {len(have)}: "
+                             f"missing {sorted(have - set(act_sa))[:4]}")
+        log(f"act scales: {len(act_sa)}/{len(have)} layers from {rel(ap_path)} "
+            f"(SA {min(act_sa.values()):.6f} .. {max(act_sa.values()):.6f})")
+
+    def install_act_hooks() -> list:
+        """Quantise-dequantise each layer's INPUT with its measured SA, per call."""
+        hs, fired = [], set()
+
+        def mk(name):
+            sa = act_sa[name]
+
+            def hook(_m, inp):
+                x = inp[0]
+                q = torch.clamp(torch.round(x / sa), -127.0, 127.0) * sa
+                fired.add(name)
+                return (q,) + tuple(inp[1:])
+            return hook
+
+        for name in act_sa:
+            hs.append(vae.get_submodule(name).register_forward_pre_hook(mk(name)))
+        return hs, fired
+
     configs: list[tuple[str, dict[str, torch.Tensor], dict]] = [
         ("all quantised", rebuilt, {"layers_quantised": len(rebuilt)})
     ]
@@ -207,6 +247,10 @@ def main() -> int:
                                "left_fp32": [{"layer": n, "cosine": c} for n, c in
                                              zip([w["layer"] for w in worst],
                                                  [w["cosine_recorded"] for w in worst])]}))
+    if act_sa:
+        configs.append(("all quantised + INT8 activations (measured SA)",
+                        rebuilt, {"layers_quantised": len(rebuilt), "act_quant": True,
+                                  "act_scales_layers": len(act_sa)}))
 
     results = []
     seen_hashes: dict[str, str] = {}
@@ -216,10 +260,18 @@ def main() -> int:
                 params[name].copy_(tens)          # restore pristine fp32
             for name, tens in weights.items():
                 params[name].copy_(tens)
+        hooks, fired = ([], set())
+        if meta.get("act_quant"):
+            hooks, fired = install_act_hooks()
         t0 = time.time()
         with torch.no_grad():
             b = vae.decode(z).sample.clone()
         dt = time.time() - t0
+        for hk_ in hooks:
+            hk_.remove()
+        if meta.get("act_quant") and len(fired) != len(act_sa):
+            raise SystemExit(f"act hooks: {len(fired)}/{len(act_sa)} layers fired — the decode "
+                             f"did not run the path these scales describe")
         # Guards that make a restore bug loud instead of plausible: a config that changed
         # nothing must not reproduce the fp32 output, and two configs that differ in which
         # layers are quantised must not produce the same tensor.
