@@ -112,10 +112,18 @@ class Sim:
 
     def __init__(self, layers: list[dict], ops: list[tuple], max_layer: int,
                  shuffle: str = "wire", bias_mode: str = "per_tap",
-                 round_mode: str = "per_tap", label: str = "wire"):
+                 round_mode: str = "per_tap", label: str = "wire",
+                 add_fp: tuple = (), cout_pc: bool = False):
         self.layers, self.ops, self.max_layer = layers, ops, max_layer
         self.shuffle = shuffle
         self.bias_mode, self.round_mode, self.label = bias_mode, round_mode, label
+        # P3.16 arms: `add_fp` = conv indices whose FOLLOWING residual add is done in
+        # float32 (the int8 hop at the add is removed; the next quantisation, the
+        # scale-invariant `norm_out`, then does the only rounding). `cout_pc` = give
+        # the 96->3 `conv_out` three per-channel output scales instead of one.
+        self.add_fp = set(add_fp)
+        self.cout_pc = cout_pc
+        self.chan_sa: dict[int, np.ndarray] = {}      # ai -> per-channel sa_out
         self.sain_override: dict[int, float] = {}     # ai -> a re-calibrated input scale
         self.wbytes = np.memmap(ART / "weights_int8.bin", dtype=np.int8, mode="r")
         self.SC = np.fromfile(ART / "scales_f32.bin", dtype="<f4").astype(np.float64)
@@ -128,6 +136,9 @@ class Sim:
         assert self.nlay == len(layers), f"sa2 {self.nlay} vs {len(layers)} layers"
         self.act: np.ndarray | None = None       # int8 [f, c, h, w]
         self.sa = 0.0
+        self.sa_vec: np.ndarray | None = None    # per-channel sa_out after a `cout_pc` conv
+        self.last_conv: int | None = None
+        self.adds: list[dict] = []               # every residual add's scale bookkeeping
         self.slot: list[tuple | None] = [None, None]
         self.hist: list[tuple] = []              # the last two conv outputs
         self.clamps = 0
@@ -222,10 +233,22 @@ class Sim:
         sa_out = float(self.SAOUT[ai])
         sc = self.SC[L["sc_off"]:L["sc_off"] + L["cout"]]
         bi = self.BI[L["sc_off"]:L["sc_off"] + L["cout"]]
+        # per-output-channel scale for the 96->3 `conv_out` (P3.16 arm `coutpc`): the
+        # artifact has one `sa_out` for all 3 channels, so a per-channel arm changes
+        # both the requant and the dequant. `sc` is ALREADY per output channel.
+        pc = self.cout_pc and ai in self.chan_sa
+        if pc:
+            sa_vec = np.asarray(self.chan_sa[ai], dtype=np.float64)
+            assert sa_vec.size == L["cout"], f"{L['name']}: {sa_vec.size} scales for {L['cout']} ch"
+            req = (sa_in * sc / sa_vec).reshape(-1, 1, 1).astype(np.float64)
+            out_sa_use = float(sa_vec.mean())
+        else:
+            sa_vec = None
+            req = (sa_in * sc / sa_out).reshape(-1, 1, 1).astype(np.float64)
+            out_sa_use = sa_out
         # the C++ builds the INT32 bias in ACCUMULATOR units, then lets CONV_2D
         # requant: out = (acc + bias_int) * sa_in*sc[c] / sa_out
         bi_int = np.trunc(bi / (sa_in * sc)).astype(np.int64)
-        req = (sa_in * sc / sa_out).reshape(-1, 1, 1).astype(np.float64)
         W = self.weights(li)
         inb = self.gather(L, sa_in)
         pad = (L["taps"][0]["kh"] // 2, L["taps"][0]["kw"] // 2)
@@ -273,13 +296,17 @@ class Sim:
             outb[f] = q2.reshape(L["cout"], L["h"], L["w"])
         self.clamps += clamps
         self.act = outb
-        self.sa = sa_out
-        self.hist.append((outb, sa_out, li))
+        self.sa = out_sa_use
+        self.sa_vec = sa_vec
+        self.last_conv = li
+        self.hist.append((outb, out_sa_use, li))
         self.hist = self.hist[-3:]
         self.last_inb = inb
         self.last_inb_name = L["name"]
-        r = dict(idx=li, ai=ai, name=L["name"], shape=list(outb.shape), sa_out=sa_out,
+        r = dict(idx=li, ai=ai, name=L["name"], shape=list(outb.shape), sa_out=out_sa_use,
                  clamp=clamps / outb.size, scheme=self.label, tap0_skipped=tap0_skipped)
+        if sa_vec is not None:
+            r.update(pc=True, sa_out_pc=[float(v) for v in sa_vec])
         self.rec.append(r)
         return r
 
@@ -302,15 +329,33 @@ class Sim:
         self.clamps += n
         self.act = q.reshape(a.shape)
         self.sa = float(out_sa)
+        self.sa_vec = None
 
     def add(self, slot: int, out_sa: float) -> None:
         s, s_sa = self.slot[slot & 1]
         assert s.shape == self.act.shape, f"ADD act {self.act.shape} vs slot {s.shape}"
-        v = (self.act.astype(np.float64) * self.sa + s.astype(np.float64) * s_sa) / out_sa
-        q, n = q_clamp(v)
-        self.clamps += n
-        self.act = q.reshape(self.act.shape)
-        self.sa = float(out_sa)
+        # what this add does to the two operands' grids: `ratio` > 1 means the sum is
+        # written on a COARSER grid than the finer operand, i.e. that operand's
+        # LSB is multiplied by `ratio` at the add.
+        rec = dict(after_conv=self.last_conv, sa_act=float(self.sa), sa_slot=float(s_sa),
+                   out_sa=float(out_sa),
+                   ratio=float(out_sa / max(min(self.sa, s_sa), 1e-30)))
+        if self.last_conv in self.add_fp:
+            # P3.16 arm `addfp`: no int8 hop at the add. The sum stays float32 and the
+            # next op (the scale-invariant `norm_out`) does the only rounding.
+            self.act = (self.act.astype(np.float32) * np.float32(self.sa)
+                        + s.astype(np.float32) * np.float32(s_sa))
+            self.sa = 1.0
+            rec.update(fp=True, clamp=0.0)
+        else:
+            v = (self.act.astype(np.float64) * self.sa + s.astype(np.float64) * s_sa) / out_sa
+            q, n = q_clamp(v)
+            self.clamps += n
+            self.act = q.reshape(self.act.shape)
+            self.sa = float(out_sa)
+            rec.update(fp=False, clamp=n / q.size)
+        self.sa_vec = None
+        self.adds.append(rec)
 
     # ---------------------------------------------------------------- the walk
     def run(self, lat: np.ndarray, lat_sa: float) -> None:
@@ -401,7 +446,12 @@ def reference_trace(z: torch.Tensor, names: list[str], sa_out: dict[str, float],
         p = tmp / f"{n}.i8"
         p.write_bytes(q.numpy().tobytes())
         tr[n] = dict(path=str(p), shape=list(q.shape), sa=sa,
-                     clamp=float((cat / sa).abs().gt(127).float().mean()))
+                     clamp=float((cat / sa).abs().gt(127).float().mean()),
+                     # per-output-channel range of the reference's OWN fp32 module output.
+                     # The artifact carries ONE `sa_out` per layer, so this is the
+                     # measurement that says what a per-channel scale would be worth
+                     # (P3.16, the `conv_out` 96->3 leg).
+                     chmax=[float(v) for v in cat.abs().amax(dim=(0, 2, 3))])
         if n in ins:
             ic = torch.cat(ins[n], dim=0)              # [frames, C, H, W] in output-frame order
             p = tmp / f"{n}.in.i8"
@@ -450,6 +500,14 @@ def final_metrics(act_i8: np.ndarray, sa: float, ref: torch.Tensor) -> dict:
     return _metrics(dev, ref)
 
 
+def final_metrics_pc(act_i8: np.ndarray, sa_vec, ref: torch.Tensor) -> dict:
+    """Same metric with each output channel dequantised at its OWN scale (P3.16)."""
+    m = torch.from_numpy(np.asarray(sa_vec, dtype=np.float32)).reshape(1, -1, 1, 1)
+    dev = (torch.from_numpy(act_i8.astype(np.float32)) * m
+           ).permute(1, 0, 2, 3).unsqueeze(0).contiguous()
+    return _metrics(dev, ref)
+
+
 def final_metrics_diff(a: torch.Tensor, b: torch.Tensor) -> dict:
     """Two fp32 decodes: measures what an op changes at all, with no quantisation in it."""
     return _metrics(a, b)
@@ -476,6 +534,11 @@ def main() -> int:
                     help="also score the MISSING `post_quant_conv` (16->16): runs the op under "
                          "the reference, feeds the walk the op's quantised output, and measures "
                          "both programme variants against the same fp32 target")
+    ap.add_argument("--layer34", action="store_true",
+                    help="score the two layer-34 candidates (P3.16) at the measured `shift` "
+                         "gather: `add34` = the last up_block's residual add done in float32 "
+                         "(no int8 hop; `norm_out` then does the only rounding), `coutpc` = "
+                         "3 per-channel output scales for the 96->3 `conv_out`, `both34` = both")
     ap.add_argument("--out", default="vae_sim")
     args = ap.parse_args()
 
@@ -507,6 +570,7 @@ def main() -> int:
     log(f"fp32 reference in {time.time() - t0:.1f} s -> {tuple(out.shape)}")
 
     # ------------------------------------------------------------------ the arm matrix
+    chan_sa: dict[int, np.ndarray] = {}          # ai -> per-channel sa_out (P3.16 `coutpc`)
     ARMS = {                     # label: (shuffle, bias placement, rounding granularity)
         "wire":    ("shift", "per_tap", "per_tap"),
         "bias1":   ("shift", "once",    "per_tap"),
@@ -518,20 +582,45 @@ def main() -> int:
         for k in keys:
             if k not in ARMS:
                 raise SystemExit(f"unknown arm {k!r}; choose from {list(ARMS)}")
-        arms = [(k, *ARMS[k]) for k in keys]
+        arms = [(k, *ARMS[k], {}) for k in keys]
+    elif args.layer34:
+        # P3.16 — the two named layer-34 candidates, one at a time and together.
+        L35 = next((L for L in layers if L["idx"] == 35), None)
+        if L35 is None or L35["name"] not in tr:
+            raise SystemExit("--layer34 needs a walk through conv_out; drop --max-layer")
+        ARMS34 = {
+            "wire":   {},
+            "add34":  dict(add_fp=(34,)),
+            "coutpc": dict(cout_pc=True),
+            "both34": dict(add_fp=(34,), cout_pc=True),
+        }
+        arms = [(k, "shift", "per_tap", "per_tap", v) for k, v in ARMS34.items()]
+        # per-channel output scales for the 96->3 `conv_out`, from the reference's OWN
+        # per-channel max (the same max/127 convention `calibrate.py` uses).
+        L35 = next(L for L in layers if L["idx"] == 35)
+        ch = tr[L35["name"]]["chmax"]
+        chan_sa[L35["ai"]] = np.asarray(ch, dtype=np.float64) / 127.0
+        log(f"conv_out per-channel max {['%.4f' % v for v in ch]} -> sa "
+            f"{['%.6g' % v for v in chan_sa[L35['ai']]]} "
+            f"(single sa {float(sim.SAOUT[L35['ai']]):.6g}, "
+            f"gain {max(ch) / (min(ch) or 1):.2f}x between channels)")
     else:
         modes = ["wire", "shift"] if args.shuffle == "both" else [args.shuffle]
-        arms = [(m, m, "per_tap", "per_tap") for m in modes]
+        arms = [(m, m, "per_tap", "per_tap", {}) for m in modes]
 
     results: dict[str, dict] = {}
     finals: dict[str, tuple[np.ndarray, float]] = {}
 
     def run_arm(label: str, shuffle: str, bias_mode: str, round_mode: str,
                 lat_use: np.ndarray, lat_sa: float, tr_use: dict, out_use: torch.Tensor,
-                override: dict[int, float] | None = None) -> dict:
-        log(f"--- arm {label}: gather={shuffle} bias={bias_mode} round={round_mode}")
+                override: dict[int, float] | None = None, add_fp: tuple = (),
+                cout_pc: bool = False) -> dict:
+        log(f"--- arm {label}: gather={shuffle} bias={bias_mode} round={round_mode}"
+            + (f" add_fp={add_fp}" if add_fp else "") + (" cout_pc=1" if cout_pc else ""))
         s = Sim(layers, ops, args.max_layer, shuffle=shuffle, bias_mode=bias_mode,
-                round_mode=round_mode, label=label)
+                round_mode=round_mode, label=label, add_fp=add_fp, cout_pc=cout_pc)
+        if cout_pc:
+            s.chan_sa = chan_sa
         if override:
             s.sain_override = override
         rows, first_bad = [], None
@@ -551,6 +640,15 @@ def main() -> int:
                 else:
                     c = cosine_codes(s.act, ref_codes)
                     r.update(cosine=c, ref_clamp=ref["clamp"], note="")
+                    if s.sa_vec is not None:
+                        # the codes are on a different (per-channel) grid, so score them
+                        # DEQUANTISED as well — the code-space cosine is not the metric
+                        rd = (torch.from_numpy(ref_codes.astype(np.float32))
+                              * np.float32(ref["sa"])).flatten()
+                        sd = (torch.from_numpy(s.act.astype(np.float32))
+                              * torch.from_numpy(np.asarray(s.sa_vec, dtype=np.float32))
+                              .reshape(1, -1, 1, 1)).flatten()
+                        r["cosine_deq"] = float(F.cosine_similarity(sd, rd, dim=0))
                     if ref.get("in_path") and s.last_inb_name == r["name"]:
                         ric = np.fromfile(ref["in_path"], dtype=np.int8).reshape(ref["in_shape"])
                         if tuple(ric.shape) == tuple(s.last_inb.shape):
@@ -568,19 +666,24 @@ def main() -> int:
         t0 = time.time()
         s.run(lat_use, lat_sa)
         fin = final_metrics(s.act, s.sa, out_use)
+        fin_pc = final_metrics_pc(s.act, s.sa_vec, out_use) if s.sa_vec is not None else None
         finals[label] = (s.act.copy(), float(s.sa))
         res = dict(convs=rows, first_divergence=first_bad, total_clamps=int(s.clamps),
-                   final=fin, walk_s=time.time() - t0, bias=bias_mode, round=round_mode,
-                   gather=shuffle,
+                   final=fin, final_pc=fin_pc, adds=s.adds,
+                   walk_s=time.time() - t0, bias=bias_mode, round=round_mode,
+                   gather=shuffle, add_fp=list(add_fp), cout_pc=bool(cout_pc),
                    worst=min((r for r in rows if r.get("cosine") is not None),
                              key=lambda r: r["cosine"], default={}))
+        if fin_pc is not None:
+            log(f"{label}: final (per-channel dequant) PSNR(2.0) {fin_pc['psnr_db']:.2f} dB · "
+                f"cosine {fin_pc['cosine']:.6f}")
         log(f"{label}: final PSNR(2.0) {fin.get('psnr_db', float('nan')):.2f} dB · cosine "
             f"{fin.get('cosine', float('nan')):.6f} · worst layer "
             f"{res['worst'].get('idx')} {res['worst'].get('cosine', float('nan')):.6f}")
         return res
 
-    for label, shuffle, bm, rm in arms:
-        results[label] = run_arm(label, shuffle, bm, rm, lat, lmeta["sa"], tr, out)
+    for label, shuffle, bm, rm, extra in arms:
+        results[label] = run_arm(label, shuffle, bm, rm, lat, lmeta["sa"], tr, out, **extra)
 
     # ------------------------------------------------------------- candidate 3: the missing op
     pqc_doc = None
@@ -623,6 +726,15 @@ def main() -> int:
                     "the previous conv and this one. `final` = the walk's last codes "
                     "dequantised at their own scale vs the fp32 decode, PSNR on data_range 2.0 "
                     "as Gate 1/vae_psnr.py.")
+    if args.layer34:
+        L35 = next(L for L in layers if L["idx"] == 35)
+        doc["layer34"] = dict(conv_out=L35["name"], conv_out_chmax=tr[L35["name"]]["chmax"],
+                             conv_out_sa_single=float(sim.SAOUT[L35["ai"]]),
+                             conv_out_sa_pc=[float(v) for v in chan_sa[L35["ai"]]],
+                             add_grid=results[labels[0]]["adds"],
+                             note="P3.16: `add34` = the residual add after conv 34 in float32; "
+                                  "`coutpc` = three per-channel output scales for conv_out. "
+                                  "`ratio` at an add = out_sa / min(operand sa)")
     js = OUT / f"{args.out}_{ts}.json"
     js.write_text(json.dumps(doc, indent=2), encoding="utf-8")
 
@@ -674,6 +786,39 @@ def main() -> int:
                f"{d0['psnr_db']:.2f} dB / cosine {d0['cosine']:.6f} — i.e. the op changes the "
                f"decode by that much, which is the error the device walk carries for free while "
                f"the artifact has no `post_quant_conv`."]
+    if args.layer34:
+        L35 = next(L for L in layers if L["idx"] == 35)
+        ch = tr[L35["name"]]["chmax"]
+        md += ["", "## P3.16 — layer 34: the residual add's grid and the `conv_out` 96→3 shape", "",
+               "Every residual add writes its sum on ONE grid (`post_add_sa`, calibrated from the",
+               "post-add max). `ratio` = that grid's LSB over the finer operand's own LSB, so a",
+               "`ratio` of 4 means the branch's quantisation step is multiplied by 4 at the add.",
+               "", "| add after conv | sa(act) | sa(residual) | out sa | ratio | clamp % (wire) |",
+               "|---|---|---|---|---|---|"]
+        for a in results[labels[0]]["adds"]:
+            md.append(f"| {a['after_conv']} | {a['sa_act']:.5g} | {a['sa_slot']:.5g} | "
+                      f"{a['out_sa']:.5g} | **{a['ratio']:.2f}×** | {a['clamp'] * 100:.4f} |")
+        md += ["", f"`conv_out` (96→3) carries ONE output scale "
+               f"`{float(sim.SAOUT[L35['ai']]):.6g}` for three channels whose reference maxima are "
+               f"{', '.join('%.4f' % v for v in ch)} — **{max(ch) / (min(ch) or 1):.2f}× spread**, "
+               "so the smallest channel runs on the largest channel's LSB. The `coutpc` arm gives "
+               "each channel `max/127`.", "",
+               "| arm | final PSNR (2.0) | cosine | rel-RMSE | worst layer | `conv_out` cosine |",
+               "|---|---|---|---|---|---|"]
+        for lb in labels:
+            r = results[lb]
+            fin = r.get("final_pc") or r.get("final", {})
+            w = r.get("worst") or {}
+            c35 = next((c for c in r["convs"] if c["idx"] == 35), {})
+            md.append(f"| **{lb}** | {fin.get('psnr_db', float('nan')):.2f} dB | "
+                      f"{fin.get('cosine', float('nan')):.6f} | "
+                      f"{fin.get('rel_rmse', 0) * 100:.2f} % | "
+                      f"{w.get('idx')} ({w.get('cosine', float('nan')):.4f}) | "
+                      f"{c35.get('cosine', float('nan')):.4f}"
+                      + (f" (deq {c35['cosine_deq']:.4f})" if "cosine_deq" in c35 else "") + " |")
+        md += ["", "Per-channel dequant is used for every arm's final number above (the `wire` arm "
+               "has one scale, so this changes nothing for it); the `conv_out` column is the "
+               "layer's own cosine against the reference module output."]
     mdp = OUT / f"{args.out}_{ts}.md"
     mdp.write_text("\n".join(md) + "\n", encoding="utf-8")
     print(f"\nwrote {js}\nwrote {mdp}")

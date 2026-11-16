@@ -40,6 +40,7 @@ tools/corun/co_recipe_device.lf.sh
 
 # host-side run logs (scratch, never committed)
 docs/device/_*.log
+docs/device/*_run.log
 tools/corun/co_downsep_device.lf.sh
 
 # git commit message scratch (written by the commit protocol, never committed)
