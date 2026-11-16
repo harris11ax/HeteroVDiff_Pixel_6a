@@ -20,7 +20,8 @@
       "kind": "measured sum: 9 GEMMs co-run + ffn.down downsep solo",
       "capture": "docs/device/corun_tg_20261115_194809.json (0.3904) + npu_tn_20261115_174838.json (0.2580)",
       "detail": "0.3904 = median of 100 rounds of 9 GEMMs x 4 tiles under GPU load; 0.2580 = 7xFC[1536,1280]+6xADD, measured solo because ffn.down has no compilable single graph (K ceiling 1664)",
-      "solo_alt_s": 0.6758
+      "solo_alt_s": 0.6758,
+      "sustained_check": "60 rounds x 9 GEMMs = 24.6 s of continuous TPU work, drift +0.35% (first-20% 408.9 vs last-20% 410.3 ms per round, slope +0.03 ms/round, TPU zone 25.0 -> 31.0 C): no thermal derating over a full NPU stage, so no derate term is applied to T_N. docs/device/RESULTS_sustain_npu.md + sustain_npu_20261115_214149.json. Not covered: ffn.down under contention, decode CONV_2D soak."
     },
     "T_V": {
       "value_s": 10.64,

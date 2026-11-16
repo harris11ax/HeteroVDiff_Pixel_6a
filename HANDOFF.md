@@ -26,8 +26,9 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg (blocked: no torch/diffusers on this host)** |
 | Gates 3–5 | pending |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
-| **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.58 s, 5.40× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
-| Blocker | every rate the cut needs is now measured on both engines (block, `ffn.down`, convs, mid-block attention, co-run) — the mid-block VAE attention closed 2026-11-15 21:2x. What is still blocked: the Gate-1 end-to-end PSNR/SSIM leg and `calibrate.py` (**no torch/diffusers on this host**), and Gates 3–5 are unbuilt |
+| **Sustained `T_N`** | **measured** → `docs/device/RESULTS_sustain_npu.md`; 60 rounds × 9 GEMMs = **24.6 s of continuous TPU work, drift +0.35 %** (first-20 % 408.9 / last-20 % 410.3 ms per round, slope +0.03 ms/round) while the TPU zone rose 25.0 → 31.0 °C ⇒ **no derating over a full NPU stage**, so `T_N` carries no throttle term. Tool: `python tools/npu/sustain_npu.py` |
+| **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.61 s, 5.394× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
+| Blocker | every rate the cut needs is now measured on both engines **and checked for sustained drift** — the mid-block VAE attention closed 2026-11-15 21:2x, the 24.6 s sustained soak 21:41. What is still blocked: the Gate-1 end-to-end PSNR/SSIM leg and `calibrate.py` (**no torch/diffusers on this host**), and Gates 3–5 are unbuilt |
 
 ## The two results that changed the project
 
@@ -135,7 +136,14 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    `k_b*` = 161 / **160** / 162 — the locked 160 survives with the attention on Mali. Trap paid for:
    the Mali tiled kernel writes past `C` when N is not a multiple of 64 (`-14` on the completion read,
    while printing 10,502 GOPS); N padded 6120 → 6144. → `RESULTS_vae_tv.md` §7.
-9. **NEXT ACTION (Phase 3, Gates 3–5).** Every rate the cut needs is now measured; build the
+9. ~~**Sustained NPU soak (throttling over a full stage)**~~ — **done 2026-11-15 21:41:49**, capture
+   `sustain_npu_20261115_214149`: 60 rounds × 9 GEMMs = **24.6 s** of continuous TPU work (longer than
+   the stage's 23.6 s), per-round 408.902 ms first-20 % vs 410.346 ms last-20 % = **+0.35 %**, slope
+   +0.03 ms/round, worst single GEMM `attn2.to_v` +2.2 %; TPU zone 25.0 → 31.0 °C and nothing derated.
+   Start was exactly on the `battery + 3` line (25.0 = 25.0), so it is table-grade. **`T_N` takes no
+   throttle term.** Not covered: `ffn.down` under contention, and the decode's `CONV_2D` class was not
+   soaked for 23.5 s. Tool: `python tools/npu/sustain_npu.py --rounds 60`.
+10. **NEXT ACTION (Phase 3, Gates 3–5).** Every rate the cut needs is now measured and drift-checked; build the
    two-process pipeline that streams ≥10 chunks on the phone: GPU process on blocks `[0,160)`, NPU
    process on `[160,180)` + decode, one handoff per chunk, no manual intervention. Start with the
    chunk handoff (one file-mapped artifact, no second INT8 copy) and prove 2 chunks before 10.
