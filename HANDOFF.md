@@ -1,5 +1,31 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
+*Updated 2026-11-16 (08:44, **P3.15 — the accumulating scheme is priced, and it is NOT the
+missing 18 dB; the absent `post_quant_conv` is worth +7.32 dB.** Four simulator arms
+(bias placement × requant granularity) plus the missing op, **host-only, no device run**:
+`vae_sim.py --schemes all --pqc`, capture `vae_sim_schemes_20261116_083315`. **`wire`
+scores 20.59 dB / cos 0.8885 against the device's measured 20.44 / 0.8967 — the simulator
+tracks the phone to 0.15 dB**, which is what makes the arms device-comparable. Bias on
+the first applied tap only: **20.30 dB (−0.29)** even though it is better per layer nearly
+everywhere (conv_in 0.9959 → **0.99995**, first divergence layer 3 → 12, layers ≥ 0.99:
+4 → 11) — **layer 34 collapses 0.7149 → 0.6325** and the end product falls, i.e. the
+`kT`-counted bias is *cancelling* a real defect at the last up_block. Requant once
+instead of per tap: **20.63 dB (+0.04)** — free and negligible. **`post_quant_conv`
+(16→16, absent from the artifact): 12.33 → 19.65 dB against the same fp32 target =
++7.32 dB**, 25× the other two combined, worst clamp 5.91 → **0.43 %**; fp32-vs-fp32 the
+op moves the decode **12.06 dB / cos 0.179**. **Measured, not applied — folding it edits
+the artifact, so it is the student's call**, and its layer-0 input scale here is a
+one-sample `max|x|/127`, not a `calibrate.py` sweep. **Layer 34
+(`decoder.up_blocks.3.resnets.2.conv2`) is the worst layer in all five arms** — the named
+next defect site. `T_V` 8.908 s, `T_N` exact 0.8905 s/block, `k_b*` 165 untouched. →
+`docs/device/RESULTS_vae_schemes.md`.*
+**NEXT ACTION, in order: (a) layer 34 — `up_blocks.3.resnets.2`: price its residual add
+at `post_add_sa` (P3.11 measured the post-add range to 4.76× conv2's own) and the
+`conv_out` 96→3 shape with the simulator, no device needed; (b) the layer-11/20
+3-frame-vs-2-frame `time_conv` support; (c) then `proc_b --decode 1` → `convwire`, and
+Gate 5. The `post_quant_conv` branch waits on the student's call before any artifact
+edit.**
+
 *Updated 2026-11-16 (08:16, **P3.14 — the decode's glue is localized and the temporal
 shuffle was WRONG: fixing it takes the device decode from 11.60 dB to 20.44 dB
 (+8.84 dB) for a one-line index change.** P3.13 named the instrument (a host program
@@ -616,11 +642,11 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  track the reference at 0.965–0.996, layer 21 (the second upsample) at 0.9488 ⇒ no second
  structural defect; the rest is accumulating scheme cost.
  **NEXT ACTION, in order: (a) score the three accumulating-scheme candidates with the
- simulator, no device needed — the per-tap INT32 bias counted `kT` times (give tap 0 the
- bias, zero the rest), the per-tap int8 rounding before the sum, and the missing
- `post_quant_conv` (16→16 — needs the student's call if it edits the artifact); (b) the
- layer-11/20 3-frame-vs-2-frame `time_conv` support; (c) then `proc_b --decode 1` →
- `convwire`, and Gate 5.**
+simulator, no device needed — **DONE 08:33, see P3.15 at the top**: two are worth
+−0.29 dB and +0.04 dB (the scheme is *not* the residual error) and the missing
+`post_quant_conv` is worth **+7.32 dB** — then **layer 34 is the named defect site**;
+(b) the layer-11/20 3-frame-vs-2-frame `time_conv` support; (c) then `proc_b --decode 1`
+→ `convwire`, and Gate 5.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
