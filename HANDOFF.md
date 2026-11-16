@@ -1,7 +1,8 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (03:47, **P3.7j — `ffn.down` under contention: the last solo term in `T_N` is
-not contended either, so `T_N` is co-run end to end**). This
+*Updated 2026-11-16 (04:40, **P3.8b — the VAE decode executes: 36/36 layers, 592/592 `CONV_2D`
+dispatches on the real INT8 artifact, 9.07 s of compute, and `CONV_2D` accepts the per-channel
+scales the FC stage rejects**). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
 `docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
@@ -396,11 +397,29 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  (measured side by side, not adopted); (2) bias stays FP32 and is flagged `quantised: false`,
  because an INT32 bias is in `SA*SW` units and `SA` is `calibrate.py`'s output — nothing invented an
  activation scale.** Mean relFro **2.000 %**. Nothing locked was touched.
- **NEXT ACTION (device, one bounded run): `npu_block convseq` — walk `vae_int8.json`, one `CONV_2D`
- per (layer, frame, tap) with int32 tap accumulation, and answer the fork first: does this HAL
- accept `TENSOR_QUANT8_SYMM_PER_CHANNEL` for `CONV_2D` (it is rejected for `FULLY_CONNECTED`)? That
- decides whether the decode can use the per-column scales at all, or is per-tensor like the FC
- stage.**
+ **P3.8b DONE 2026-11-16 04:37 — the decode EXECUTES, and `CONV_2D` takes per-channel scales** →
+ `docs/device/RESULTS_vae_convseq.md`, tool `tools/npu/vae_seq.py` + `npu_block convseq`, capture
+ `vae_seq_smoke_20261116_043719`. The artifact's **36/36 layers, 100 graphs, 592/592 executes**
+ (= the plan's count) ran on one file-mapped 72,751,648 B copy; **9,065.3 ms of compute** vs the
+ plan's 10,554.4 per-op sum (**0.859×**, 1,129 GOPS), compile 186 ms/graph, process wall 43.18 s.
+ **The fork is answered: `CONV_2D` ACCEPTS `TENSOR_QUANT8_SYMM_PER_CHANNEL`** (add 0, finish 0,
+ delegated 1, compile 85.8 ms) — 36/36 layers compiled per-channel, 0 fallbacks — so the FC's
+ per-tensor restriction is an op hole, not the device, and the two `time_conv` cosine 0.9974
+ layers are a live cost of the locked scheme. Per layer the agreement is *not* uniform: latent
+ 34×60 layers run **1.31–1.46× the per-op sum** (fixed ~0.9 ms/dispatch) while 272×480 run
+ **0.86×** — quote a per-layer decode time with the tool that produced it. **13.7 s of the 22.78 s
+ wall is this harness's own epilogue** (int32 tap accumulate + scalar double requant), so T_V only
+ holds if that is fused/replaced. Thermal **started 0.9 °C over the gate** (TPU 25.0 vs 24.1,
+ cold battery) and ended 41.0 → mechanism-grade, stated. Not wired: residual/shortcut adds,
+ SiLU, temporal-shuffle offset, and `SA` is the declared nominal 1/127 → **no quality claim.**
+ The wiring is derived+asserted for all 36 layers (3→5→9 frames, 34×60→272×480): the shape chain
+ closes. Trap: manifest scale offsets are **BYTES** (÷4), caught by an assertion.
+ **NEXT ACTION (device, one bounded run): the cool re-run for a table-grade start** —
+ `python tools/npu/cool_rerun.py --cmd "python tools/npu/vae_seq.py --run --out vae_seq_cool"`
+ (launched 04:4x, marker `docs/device/.measurement_in_flight`). **Then the host-only work:**
+ Gate 1's FP32-vs-INT8 PSNR ≥ 28 dB / SSIM ≥ 0.92 leg and `calibrate.py` (which is also what turns
+ "executes" into "decodes": it is the only source of `SA`), then Gate 5 (≥10 chunks with the
+ decode in it, `--decode 1` should call `convseq` instead of printing the reference).
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
