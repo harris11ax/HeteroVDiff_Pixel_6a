@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 import tempfile
@@ -110,9 +111,12 @@ class Sim:
     """`npu_block convwire`'s walk, op for op, in numpy."""
 
     def __init__(self, layers: list[dict], ops: list[tuple], max_layer: int,
-                 shuffle: str = "wire"):
+                 shuffle: str = "wire", bias_mode: str = "per_tap",
+                 round_mode: str = "per_tap", label: str = "wire"):
         self.layers, self.ops, self.max_layer = layers, ops, max_layer
         self.shuffle = shuffle
+        self.bias_mode, self.round_mode, self.label = bias_mode, round_mode, label
+        self.sain_override: dict[int, float] = {}     # ai -> a re-calibrated input scale
         self.wbytes = np.memmap(ART / "weights_int8.bin", dtype=np.int8, mode="r")
         self.SC = np.fromfile(ART / "scales_f32.bin", dtype="<f4").astype(np.float64)
         self.BI = np.fromfile(ART / "bias_f32.bin", dtype="<f4").astype(np.float64)
@@ -214,7 +218,8 @@ class Sim:
     def conv(self, li: int) -> dict:
         L = self.layers[li]
         ai = L["ai"]
-        sa_in, sa_out = float(self.SAIN[ai]), float(self.SAOUT[ai])
+        sa_in = float(self.sain_override.get(ai, self.SAIN[ai]))
+        sa_out = float(self.SAOUT[ai])
         sc = self.SC[L["sc_off"]:L["sc_off"] + L["cout"]]
         bi = self.BI[L["sc_off"]:L["sc_off"] + L["cout"]]
         # the C++ builds the INT32 bias in ACCUMULATOR units, then lets CONV_2D
@@ -229,12 +234,15 @@ class Sim:
         step = max(1, int((2 ** 24) // max(1, per_term)))
         outb = np.zeros((L["frames"], L["cout"], L["h"], L["w"]), dtype=np.int8)
         clamps = 0
+        tap0_skipped = 0
         for f in range(L["frames"]):
             acc = np.zeros((L["cout"], L["h"], L["w"]), dtype=np.int32)
-            for ti, T in enumerate(L["taps"]):
-                src = f - T["delta"]
-                if src < 0 or src >= L["fin"]:
-                    continue
+            applied = [(ti, f - T["delta"]) for ti, T in enumerate(L["taps"])
+                       if 0 <= f - T["delta"] < L["fin"]]
+            if applied and applied[0][0] != 0:
+                tap0_skipped += 1
+            bias_acc = np.zeros((L["cout"], L["h"], L["w"]), dtype=np.int32)
+            for k, (ti, src) in enumerate(applied):
                 x = torch.from_numpy(inb[src].astype(np.float32))
                 acc_t = np.zeros((L["cout"], L["h"], L["w"]), dtype=np.int32)
                 for c0 in range(0, L["cin"], step):
@@ -242,13 +250,25 @@ class Sim:
                     wch = torch.from_numpy(W[ti][:, c0:c1].astype(np.float32))
                     part = F.conv2d(x[None, c0:c1], wch, padding=pad)[0]
                     acc_t += torch.round(part).to(torch.int32).numpy()
-                # P3.13 MEASURED DEFECT (not fixed here): every tap's graph carries
-                # the same INT32 bias and each tap is rounded to int8 before the sum.
-                v = (acc_t.astype(np.float64) + bi_int.reshape(-1, 1, 1)) * req
-                q, n = q_clamp(v)
-                clamps += n
-                acc += q.reshape(L["cout"], L["h"], L["w"]).astype(np.int32)
-            q2, n2 = q_clamp(acc)
+                # ---- the accumulating-scheme arms (P3.15). `wire` = the C++ as built:
+                # every tap's graph carries the same INT32 bias, and each tap is
+                # requantised+clamped to int8 before the sum. `bias1` gives the bias to
+                # the first APPLIED tap only (tap 0's graph); `noround` keeps the bias on
+                # every tap but sums in int32 and requants once; `exact` does both.
+                b = 1 if (self.bias_mode == "per_tap" or k == 0) else 0
+                if self.round_mode == "per_tap":
+                    v = (acc_t.astype(np.float64) + b * bi_int.reshape(-1, 1, 1)) * req
+                    q, n = q_clamp(v)
+                    clamps += n
+                    acc += q.reshape(L["cout"], L["h"], L["w"]).astype(np.int32)
+                else:
+                    acc += acc_t
+                    if b:
+                        bias_acc += bi_int.reshape(-1, 1, 1)
+            if self.round_mode == "per_tap":
+                q2, n2 = q_clamp(acc)
+            else:
+                q2, n2 = q_clamp((acc + bias_acc).astype(np.float64) * req)
             clamps += n2
             outb[f] = q2.reshape(L["cout"], L["h"], L["w"])
         self.clamps += clamps
@@ -259,7 +279,7 @@ class Sim:
         self.last_inb = inb
         self.last_inb_name = L["name"]
         r = dict(idx=li, ai=ai, name=L["name"], shape=list(outb.shape), sa_out=sa_out,
-                 clamp=clamps / outb.size)
+                 clamp=clamps / outb.size, scheme=self.label, tap0_skipped=tap0_skipped)
         self.rec.append(r)
         return r
 
@@ -331,10 +351,17 @@ def latent_codes(ddir: Path) -> tuple[np.ndarray, dict]:
 
 # ----------------------------------------------------------------- the reference
 def reference_trace(z: torch.Tensor, names: list[str], sa_out: dict[str, float],
-                    sa_in: dict[str, float], tmp: Path) -> tuple[dict, torch.Tensor]:
-    """fp32 decode with the program's deviations (attention skipped, post_quant_conv
-    bypassed), each layer module's output concatenated over the decoder's frame
-    chunks and written as int8 codes at that layer's own `SA_out`."""
+                    sa_in: dict[str, float], tmp: Path, bypass_pqc: bool = True,
+                    want_pqc_z: bool = False) -> tuple[dict, torch.Tensor, np.ndarray | None]:
+    """fp32 decode with the program's deviations (attention skipped, and by default
+    `post_quant_conv` bypassed), each layer module's output concatenated over the
+    decoder's frame chunks and written as int8 codes at that layer's own `SA_out`.
+
+    `bypass_pqc=False` runs the op the artifact does not carry (P3.15 candidate 3), so
+    the trace is the "correct program" target; `want_pqc_z=True` also returns the
+    op's own output as [f, c, h, w], which is the latent a device program would have
+    to consume if the op were folded in.
+    """
     from diffusers import AutoencoderKLWan
 
     vae = AutoencoderKLWan.from_pretrained(str(VAE_DIR), torch_dtype=torch.float32).eval()
@@ -349,8 +376,12 @@ def reference_trace(z: torch.Tensor, names: list[str], sa_out: dict[str, float],
             hooks.append(mod.register_forward_pre_hook(     # upsampled tensor under test
                 lambda m, i, n=n: ins[n].append(i[0].detach().clone())))
     hooks.append(vae.decoder.mid_block.attentions[0].register_forward_hook(lambda m, i, o: i[0]))
-    hooks.append(vae.post_quant_conv.register_forward_hook(lambda m, i, o: i[0]))
+    if bypass_pqc:
+        hooks.append(vae.post_quant_conv.register_forward_hook(lambda m, i, o: i[0]))
+    pqc_out = None
     with torch.no_grad():
+        if want_pqc_z and not bypass_pqc:
+            pqc_out = vae.post_quant_conv(z).detach().clone()      # [1, C, F, H, W]
         out = vae.decode(z).sample
     for h in hooks:
         h.remove()
@@ -379,13 +410,50 @@ def reference_trace(z: torch.Tensor, names: list[str], sa_out: dict[str, float],
             tr[n]["in_path"] = str(p)
             tr[n]["in_sa"] = float(sa_in[n])
             tr[n]["in_shape"] = list(ic.shape)
-    return tr, out
+    pqc_np = None
+    if pqc_out is not None:
+        pqc_np = pqc_out.squeeze(0).permute(1, 0, 2, 3).contiguous().numpy()   # [f,c,h,w]
+    return tr, out, pqc_np
 
 
 def cosine_codes(a: np.ndarray, b: np.ndarray) -> float:
     a = a.reshape(-1).astype(np.float64)
     b = b.reshape(-1).astype(np.float64)
     return float(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-30))
+
+
+def _metrics(dev: torch.Tensor, ref: torch.Tensor) -> dict:
+    """`vae_psnr.py`'s metric block (Gate 1's data_range 2.0), so the numbers are comparable."""
+    if tuple(dev.shape) != tuple(ref.shape):
+        return {"shape_mismatch": [list(dev.shape), list(ref.shape)]}
+    d = dev - ref
+    rmse = float(torch.sqrt(torch.mean(d ** 2)))
+    rms_ref = float(torch.sqrt(torch.mean(ref ** 2)))
+    peak = float(ref.abs().max())
+    rmse_pk = float(torch.sqrt(torch.mean(d ** 2)))
+    return {
+        "psnr_db": float("inf") if rmse == 0 else 20.0 * math.log10(2.0 / rmse),
+        "psnr_db_datapeak": (float("inf") if rmse_pk == 0 else
+                             20.0 * math.log10(peak / rmse_pk)) if peak > 0 else None,
+        "cosine": float(F.cosine_similarity(dev.flatten(), ref.flatten(), dim=0)),
+        "rmse": rmse,
+        "rel_rmse": rmse / max(rms_ref, 1e-12),
+        "ref_absmax": peak,
+        "ref_rms": rms_ref,
+    }
+
+
+def final_metrics(act_i8: np.ndarray, sa: float, ref: torch.Tensor) -> dict:
+    """The walk's final codes, dequantised at its own scale, vs an fp32 decode."""
+    dev = (torch.from_numpy(act_i8.astype(np.float32) * np.float32(sa))
+           .permute(1, 0, 2, 3).unsqueeze(0).contiguous())
+    return _metrics(dev, ref)
+
+
+def final_metrics_diff(a: torch.Tensor, b: torch.Tensor) -> dict:
+    """Two fp32 decodes: measures what an op changes at all, with no quantisation in it."""
+    return _metrics(a, b)
+
 
 
 def main() -> int:
@@ -399,6 +467,15 @@ def main() -> int:
                     help="temporal-upsample gather: `wire` = npu_block.cpp's (t//2, t%2); "
                          "`shift` = the mapping measured off the reference's own conv input; "
                          "`both` measures them side by side")
+    ap.add_argument("--schemes", default=None,
+                    help="score the accumulating-scheme arms instead of the shuffle arms, at "
+                         "the measured `shift` gather: `all` or a comma list of "
+                         "wire,bias1,noround,exact (bias1 = INT32 bias on the first applied tap "
+                         "only; noround = taps summed in int32 and requantised once)")
+    ap.add_argument("--pqc", action="store_true",
+                    help="also score the MISSING `post_quant_conv` (16->16): runs the op under "
+                         "the reference, feeds the walk the op's quantised output, and measures "
+                         "both programme variants against the same fp32 target")
     ap.add_argument("--out", default="vae_sim")
     args = ap.parse_args()
 
@@ -426,21 +503,44 @@ def main() -> int:
     names = list(sa_out)
     t0 = time.time()
     sa_in_d = {L["name"]: float(sim.SAIN[L["ai"]]) for L in layers if L["idx"] <= args.max_layer}
-    tr, out = reference_trace(z, names, sa_out, sa_in_d, tmp)
+    tr, out, _ = reference_trace(z, names, sa_out, sa_in_d, tmp)
     log(f"fp32 reference in {time.time() - t0:.1f} s -> {tuple(out.shape)}")
 
-    modes = ["wire", "shift"] if args.shuffle == "both" else [args.shuffle]
+    # ------------------------------------------------------------------ the arm matrix
+    ARMS = {                     # label: (shuffle, bias placement, rounding granularity)
+        "wire":    ("shift", "per_tap", "per_tap"),
+        "bias1":   ("shift", "once",    "per_tap"),
+        "noround": ("shift", "per_tap", "once"),
+        "exact":   ("shift", "once",    "once"),
+    }
+    if args.schemes:
+        keys = list(ARMS) if args.schemes == "all" else args.schemes.split(",")
+        for k in keys:
+            if k not in ARMS:
+                raise SystemExit(f"unknown arm {k!r}; choose from {list(ARMS)}")
+        arms = [(k, *ARMS[k]) for k in keys]
+    else:
+        modes = ["wire", "shift"] if args.shuffle == "both" else [args.shuffle]
+        arms = [(m, m, "per_tap", "per_tap") for m in modes]
+
     results: dict[str, dict] = {}
-    for mode in modes:
-        log(f"--- shuffle={mode}")
-        s = Sim(layers, ops, args.max_layer, shuffle=mode)
+    finals: dict[str, tuple[np.ndarray, float]] = {}
+
+    def run_arm(label: str, shuffle: str, bias_mode: str, round_mode: str,
+                lat_use: np.ndarray, lat_sa: float, tr_use: dict, out_use: torch.Tensor,
+                override: dict[int, float] | None = None) -> dict:
+        log(f"--- arm {label}: gather={shuffle} bias={bias_mode} round={round_mode}")
+        s = Sim(layers, ops, args.max_layer, shuffle=shuffle, bias_mode=bias_mode,
+                round_mode=round_mode, label=label)
+        if override:
+            s.sain_override = override
         rows, first_bad = [], None
         orig_conv = s.conv
 
-        def conv_and_cmp(li: int, s=s, rows=rows) -> dict:
+        def conv_and_cmp(li: int) -> dict:
             nonlocal first_bad
             r = orig_conv(li)
-            ref = tr.get(r["name"])
+            ref = tr_use.get(r["name"])
             if ref is None:
                 r.update(cosine=None, note="no reference tensor")
             else:
@@ -465,17 +565,64 @@ def main() -> int:
             return r
 
         s.conv = conv_and_cmp                        # type: ignore[method-assign]
-        s.run(lat, lmeta["sa"])
-        results[mode] = dict(convs=rows, first_divergence=first_bad,
-                             total_clamps=int(s.clamps))
+        t0 = time.time()
+        s.run(lat_use, lat_sa)
+        fin = final_metrics(s.act, s.sa, out_use)
+        finals[label] = (s.act.copy(), float(s.sa))
+        res = dict(convs=rows, first_divergence=first_bad, total_clamps=int(s.clamps),
+                   final=fin, walk_s=time.time() - t0, bias=bias_mode, round=round_mode,
+                   gather=shuffle,
+                   worst=min((r for r in rows if r.get("cosine") is not None),
+                             key=lambda r: r["cosine"], default={}))
+        log(f"{label}: final PSNR(2.0) {fin.get('psnr_db', float('nan')):.2f} dB · cosine "
+            f"{fin.get('cosine', float('nan')):.6f} · worst layer "
+            f"{res['worst'].get('idx')} {res['worst'].get('cosine', float('nan')):.6f}")
+        return res
+
+    for label, shuffle, bm, rm in arms:
+        results[label] = run_arm(label, shuffle, bm, rm, lat, lmeta["sa"], tr, out)
+
+    # ------------------------------------------------------------- candidate 3: the missing op
+    pqc_doc = None
+    if args.pqc:
+        log("--- post_quant_conv: reference WITH the op (fp32 target) + the walk that consumes it")
+        tmp2 = Path(tempfile.mkdtemp(prefix="vae_sim_pqc_"))
+        t0 = time.time()
+        tr2, out2, zpq = reference_trace(z, names, sa_out, sa_in_d, tmp2,
+                                        bypass_pqc=False, want_pqc_z=True)
+        log(f"fp32 reference (post_quant_conv ON) in {time.time() - t0:.1f} s")
+        d_pqc = final_metrics_diff(out2, out)        # how much the op changes the decode at all
+        sa_pq = float(np.abs(zpq).max()) / 127.0
+        lat_pq, n_sat = q_clamp(zpq / sa_pq)
+        log(f"post_quant_conv out {zpq.shape} range {zpq.min():.4f}..{zpq.max():.4f} "
+            f"-> quantised at sa {sa_pq:.6g} ({n_sat} codes clamped)")
+        base = "exact" if "exact" in results else arms[0][0]
+        i0 = next(L["ai"] for L in layers if L["idx"] == 0)
+        pqc_label = f"{base}+pqc"
+        results[pqc_label] = run_arm(pqc_label, "shift", "once", "once", lat_pq, sa_pq, tr2, out2,
+                                    override={i0: sa_pq})
+        # both programme variants against the SAME target: the fp32 decode with the op in it
+        same_target = {k: final_metrics(finals[k][0], finals[k][1], out2)
+                       for k in (base, pqc_label) if k in finals}
+        pqc_doc = dict(sa=sa_pq, clamped_codes=int(n_sat), fp32_vs_fp32=d_pqc,
+                       against_pqc_target=same_target, base_arm=base,
+                       op="post_quant_conv 16->16, absent from artifacts/vae (36 layers = decoder only)")
+        log(f"post_quant_conv is worth: {same_target[base]['psnr_db']:.2f} dB -> "
+            f"{same_target[pqc_label]['psnr_db']:.2f} dB against the same fp32 target "
+            f"(cosine {same_target[base]['cosine']:.6f} -> {same_target[pqc_label]['cosine']:.6f})")
+        shutil.rmtree(tmp2, ignore_errors=True)
     shutil.rmtree(tmp, ignore_errors=True)
 
     ts = time.strftime("%Y%m%d_%H%M%S")
+    labels = list(results)
     doc = dict(kind="vae_program_sim", timestamp=ts, wire=str(Path(args.wire).name),
                latent_dir=ddir.name, max_layer=args.max_layer, results=results,
+               post_quant_conv=pqc_doc,
                note="cosine = the simulator's int8 codes vs the fp32 reference's own module "
                     "output quantised at the same SA_out; a collapse localizes the op between "
-                    "the previous conv and this one")
+                    "the previous conv and this one. `final` = the walk's last codes "
+                    "dequantised at their own scale vs the fp32 decode, PSNR on data_range 2.0 "
+                    "as Gate 1/vae_psnr.py.")
     js = OUT / f"{args.out}_{ts}.json"
     js.write_text(json.dumps(doc, indent=2), encoding="utf-8")
 
@@ -483,29 +630,60 @@ def main() -> int:
           f"wire `{Path(args.wire).name}` · latent `{ddir.name}` · max layer {args.max_layer}",
           "", "`wire` = the gather `npu_block.cpp` implements; `shift` = the mapping measured "
           "off the reference decoder's own conv input. Same latent, artifact and scales.", "",
-          "| layer | ai | module | shape | clamp % (wire) | cos (wire) | cos (ref) |",
-          "|---|---|---|---|---|---|---|"]
-    base = results[modes[0]]["convs"]
-    for i, r in enumerate(base):
-        other = results["shift"]["convs"][i] if "shift" in results else None
-        cw = r.get("cosine")
-        cr = other.get("cosine") if other else None
+          "## The walk's end product, per arm", "",
+          "| arm | bias | rounding | final PSNR (2.0) | cosine | rel-RMSE | worst layer | clamp % |",
+          "|---|---|---|---|---|---|---|---|"]
+    for lb in labels:
+        r = results[lb]
+        fin = r.get("final", {})
+        w = r.get("worst") or {}
+        md.append(f"| **{lb}** | {r['bias']} | {r['round']} | "
+                  + ("—" if "psnr_db" not in fin else f"{fin['psnr_db']:.2f} dB")
+                  + " | " + ("—" if "cosine" not in fin else f"{fin['cosine']:.6f}")
+                  + " | " + ("—" if "rel_rmse" not in fin else f"{fin['rel_rmse'] * 100:.2f} %")
+                  + " | " + ("—" if not w else f"{w.get('idx')} ({w.get('cosine'):.6f})")
+                  + f" | {max((c.get('clamp') or 0.0) for c in r['convs']) * 100:.4f} |")
+    md += ["", "## Per layer, one cosine column per arm", "",
+           "| layer | ai | module | shape | " + " | ".join(f"cos ({lb})" for lb in labels) + " |",
+           "|---|---|---|---|" + "---|" * len(labels)]
+    base_rows = results[labels[0]]["convs"]
+    for i, r in enumerate(base_rows):
+        cells = []
+        for lb in labels:
+            o = results[lb]["convs"][i] if i < len(results[lb]["convs"]) else None
+            c = o.get("cosine") if o else None
+            cells.append("—" if c is None else f"{c:.6f}")
         md.append(f"| {r['idx']} | {r['ai']} | `{r['name']}` | {r['shape']} | "
-                  f"{r['clamp'] * 100:.4f} | "
-                  + ("—" if cw is None else f"{cw:.6f}") + " | "
-                  + ("—" if cr is None else f"{cr:.6f}") + " |")
-    for mode in modes:
-        fb = results[mode]["first_divergence"]
-        md += ["", f"**{mode}**: first divergence " + (
+                  + " | ".join(cells) + " |")
+    for lb in labels:
+        fb = results[lb]["first_divergence"]
+        md += ["", f"**{lb}**: first divergence " + (
             "none (all convs >= 0.99)" if not fb else
             f"layer {fb['idx']} (`{fb['name']}`) at cosine {fb['cosine']:.6f}")]
+    if pqc_doc:
+        st, d0 = pqc_doc["against_pqc_target"], pqc_doc["fp32_vs_fp32"]
+        md += ["", "## Missing `post_quant_conv` (16→16), scored", "",
+               f"Both programme variants against the SAME fp32 target — the decode with the op in "
+               f"it (attention skipped, as the program skips it). Its output quantises at "
+               f"`sa = {pqc_doc['sa']:.6g}` ({pqc_doc['clamped_codes']} clamped codes).", "",
+               "| variant | PSNR (2.0) | cosine | rel-RMSE |", "|---|---|---|---|"]
+        for k, v in st.items():
+            md.append(f"| {k} | {v['psnr_db']:.2f} dB | {v['cosine']:.6f} | "
+                      f"{v['rel_rmse'] * 100:.2f} % |")
+        md += ["", f"fp32 vs fp32 (op on vs bypassed, no quantisation anywhere): "
+               f"{d0['psnr_db']:.2f} dB / cosine {d0['cosine']:.6f} — i.e. the op changes the "
+               f"decode by that much, which is the error the device walk carries for free while "
+               f"the artifact has no `post_quant_conv`."]
     mdp = OUT / f"{args.out}_{ts}.md"
     mdp.write_text("\n".join(md) + "\n", encoding="utf-8")
     print(f"\nwrote {js}\nwrote {mdp}")
-    for mode in modes:
-        fb = results[mode]["first_divergence"]
-        print(f"{mode:5s}: " + ("no divergence" if not fb else
-              f"layer {fb['idx']} {fb['name']} cosine {fb['cosine']:.6f}"))
+    for lb in labels:
+        fin = results[lb].get("final", {})
+        fb = results[lb]["first_divergence"]
+        print(f"{lb:10s}: " + ("no divergence" if not fb else
+              f"first div layer {fb['idx']} ({fb['cosine']:.6f})") +
+              ("" if "psnr_db" not in fin else
+               f" | final {fin['psnr_db']:.2f} dB / cos {fin['cosine']:.6f}"))
     return 0
 
 
