@@ -272,6 +272,146 @@ void gemm16_tiled(__global const half* A, __global const half* W,
     }
 }
 
+// =========================================================== VAE decode convs ==
+// conv8_taps — the Wan decoder's causal 3-D convs as an implicit INT8 GEMM.
+//
+// `T_V`'s Mali branch. The TPU branch had to decompose each kT x 3 x 3 causal
+// conv into kT separate 2-D CONV_2D dispatches (no CONV_3D in NNAPI); on the GPU
+// the whole thing is ONE dispatch that accumulates every tap into the output
+// frame, reusing the same tiling / `arm_dot_acc` inner loop as gemm8_tiled.
+//
+// Input  : padded NHWC int8, `taps` frames in one buffer
+//            In[(t*Hp + (ph+ky))*Wp + (pw+kx)][c]
+//          pad = 1 for s=3 (zero border), 0 for s=1. Cin is padded up to a
+//          multiple of 4*KV with ZERO channels and zero weights, so the vector
+//          loads never straddle a pixel and the extra MACs contribute nothing.
+// Weight : row-major [Cout, nst*CinP] with k = ((t*s+ky)*s+kx)*CinP + c, i.e.
+//          the k-fastest axis is the channel — exactly the `char4` row the dot
+//          wants. (This is a repack of weights that are int8 in the artifact
+//          anyway; the base DiT weights are untouched, so the one-copy rule is
+//          not violated. The repack is a one-time host step in a real executor,
+//          and it is NOT part of the timed region below.)
+// Output : int32 [M, Cout], M = H*W. Dequant (sa * sw[n]) is a per-column
+//          epilogue and is not timed — the TPU table is op-only too.
+//
+// conv8_ref is the exact integer reference for the same buffers (one work-item
+// per output), so the tiled kernel is verified against it, not against a model.
+
+__kernel void conv8_ref(__global const char* In, __global const char* W, __global int* Craw,
+                        const int H, const int Wd, const int Cin, const int CinP,
+                        const int Cout, const int s, const int taps, const int M)
+{
+    const int n = (int)get_global_id(0), m = (int)get_global_id(1);
+    if (n >= Cout || m >= M) return;
+    const int pad = (s == 3) ? 1 : 0;
+    const int Wp = Wd + 2 * pad, Hp = H + 2 * pad;
+    const int ph = m / Wd, pw = m - ph * Wd;
+    const int nst = taps * s * s;
+    int acc = 0;
+    for (int t = 0; t < taps; ++t)
+        for (int ky = 0; ky < s; ++ky)
+            for (int kx = 0; kx < s; ++kx) {
+                const int st = (t * s + ky) * s + kx;
+                __global const char* in =
+                    In + (((size_t)t * Hp + (ph + ky)) * Wp + (pw + kx)) * (size_t)CinP;
+                __global const char* w =
+                    W + (size_t)n * nst * CinP + (size_t)st * CinP;
+                for (int c = 0; c < Cin; ++c) acc += (int)in[c] * (int)w[c];
+            }
+    Craw[(size_t)m * Cout + n] = acc;
+}
+
+__kernel __attribute__((reqd_work_group_size(BN / TN, BM / TM, 1)))
+void conv8_taps(__global const char4* In, __global const char4* W, __global int* Craw,
+                const int H, const int Wd, const int Cin4, const int Cout,
+                const int s, const int taps, const int M)
+{
+    const int lx = get_local_id(0), ly = get_local_id(1);
+    const int nbase = (int)get_group_id(0) * BN;
+    const int mbase = (int)get_group_id(1) * BM;
+    const int n0 = nbase + lx * TN;
+    const int m0 = mbase + ly * TM;
+
+    const int pad = (s == 3) ? 1 : 0;
+    const int Wp = Wd + 2 * pad, Hp = H + 2 * pad;
+    const int frame4 = Hp * Wp * Cin4;          // char4 units per padded frame
+    const int nst = taps * s * s;
+    const int Ktot4 = nst * Cin4;               // weight row stride (char4)
+
+    __local char4 As[KV][BM + 1];
+    __local char4 Bs[KV][BN + 1];
+    __local int Abase[BM];                      // padded pixel offset per output row
+
+    int acc[TM][TN];
+#pragma unroll
+    for (int i = 0; i < TM; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = 0;
+
+    const int nt = (BN / TN) * (BM / TM);
+    const int lid = ly * (BN / TN) + lx;
+
+    // pixel origin of each row of the tile: the div/mod is paid once per group,
+    // not once per staged element (this is what the LDS path has over the direct
+    // one here — taps make the address arithmetic the inner-loop cost).
+    // NOTE the unpadded origin: the `pad` border shows up as the tap offset
+    // (ky*Wp + kx), so row = ph + ky lands in [0, H+2) exactly. Adding `pad` here
+    // as well double-counts the border and runs the last tap row off the end of
+    // the buffer (measured: every dispatch faults, CL_EXEC_STATUS_ERROR -14).
+    for (int idx = lid; idx < BM; idx += nt) {
+        int m = mbase + idx;
+        if (m >= M) m = M - 1;                  // clamp: last group's tail rows
+        const int ph = m / Wd, pw = m - ph * Wd;
+        Abase[idx] = ph * Wp + pw;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int st = 0; st < nst; ++st) {
+        const int t = st / (s * s), r = st - t * (s * s);
+        const int ky = r / s, kx = r - ky * s;
+        const int foff = t * frame4 + (ky * Wp + kx) * Cin4;   // char4 units: frame + tap
+        for (int k0 = 0; k0 < Cin4; k0 += KV) {
+            for (int idx = lid; idx < BM * KV; idx += nt) {
+                const int mi = idx / KV, ki = idx - mi * KV;
+                As[ki][mi] = In[foff + Abase[mi] * Cin4 + k0 + ki];
+            }
+            for (int idx = lid; idx < BN * KV; idx += nt) {
+                const int ni = idx / KV, ki = idx - ni * KV;
+                int nn = nbase + ni;
+                if (nn >= Cout) nn = Cout - 1;  // tiny-Cout tail: clamp the read
+                Bs[ki][ni] = W[nn * Ktot4 + st * Cin4 + k0 + ki];
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+#pragma unroll 2
+            for (int ki = 0; ki < KV; ++ki) {
+                char4 a[TM], b[TN];
+#pragma unroll
+                for (int i = 0; i < TM; ++i) a[i] = As[ki][ly * TM + i];
+#pragma unroll
+                for (int j = 0; j < TN; ++j) b[j] = Bs[ki][lx * TN + j];
+#pragma unroll
+                for (int i = 0; i < TM; ++i)
+#pragma unroll
+                    for (int j = 0; j < TN; ++j)
+                        acc[i][j] = arm_dot_acc(a[i], b[j], acc[i][j]);
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < TM; ++i) {
+        const int m = m0 + i;
+        if (m < M) {
+#pragma unroll
+            for (int j = 0; j < TN; ++j) {
+                const int n = n0 + j;
+                if (n < Cout) Craw[(size_t)m * Cout + n] = acc[i][j];
+            }
+        }
+    }
+}
+
 // ================================================================ diag =======
 // Feature ladder + throughput probes used to isolate driver rejections and to
 // establish what the dot builtin actually costs on this GPU.

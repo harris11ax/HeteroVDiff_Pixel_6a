@@ -21,6 +21,7 @@ __pycache__/
 # device-run scratch state (agent-only, never committed)
 docs/device/.measurement_in_flight
 docs/device/.cool_rerun.log
+docs/device/.conv_tv.log
 
 # editors / OS
 .vscode/
@@ -28,3 +29,4 @@ docs/device/.cool_rerun.log
 .DS_Store
 Thumbs.db
 docs/device/.cool_rerun.stdout
+docs/device/.conv_tv.log

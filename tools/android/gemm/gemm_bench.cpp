@@ -732,7 +732,206 @@ static void do_peak(CL* c, const std::string& src, int iters) {
     c->ReleaseProgram(prog);
 }
 
-// -------------------------------------------------------------------- main
+// ------------------------------------------------------------ VAE conv (T_V)
+// The 13 conv classes of the Wan 2.1 decoder at Preset A — the same classes the
+// TPU branch in docs/device/RESULTS_vae_tv.md measured, so the two branches are a
+// like-for-like comparison. Ordered heaviest class first: the thermal gate is
+// checked when the run starts, so the MACs that actually dominate `T_V` are timed
+// while the device is still at the floor (same protocol as the T_N re-run).
+//
+// Measures ONE dispatch per class = all temporal and spatial taps of one output
+// frame accumulated (the fused form the GPU can do, which NNAPI cannot). Layer
+// cost = ms x frames; class cost = layer x ops_in_class.
+struct ConvClass { const char* name; int H, W, Cin, Cout, taps, s, ops, frames; };
+static const ConvClass CONV_CLASSES[] = {
+    {"conv3^3_96->96_272x480",    272, 480,  96,  96, 3, 3, 6, 9},
+    {"conv3^3_192->192_136x240",  136, 240, 192, 192, 3, 3, 6, 9},
+    {"conv3^3_384->384_68x120",    68, 120, 384, 384, 3, 3, 5, 5},
+    {"conv3^3_384->384_34x60",     34,  60, 384, 384, 3, 3, 10, 3},
+    {"conv3x3_192->96_272x480",   272, 480, 192,  96, 1, 3, 1, 9},
+    {"conv3x3_384->192_136x240",  136, 240, 384, 192, 1, 3, 1, 9},
+    {"conv3^3_192->384_68x120",    68, 120, 192, 384, 3, 3, 1, 5},
+    {"tconv3x1_384->768_68x120",   68, 120, 384, 768, 3, 1, 1, 5},
+    {"conv3x3_384->192_68x120",    68, 120, 384, 192, 1, 3, 1, 5},
+    {"conv3^3_96->3_272x480",     272, 480,  96,   3, 3, 3, 1, 9},
+    {"tconv3x1_384->768_34x60",    34,  60, 384, 768, 3, 1, 1, 3},
+    {"conv1x1_192->384_68x120",    68, 120, 192, 384, 1, 1, 1, 5},
+    {"conv3^3_16->384_34x60",      34,  60,  16, 384, 3, 3, 1, 3},
+};
+static const int NCONV = (int)(sizeof(CONV_CLASSES) / sizeof(CONV_CLASSES[0]));
+
+// Cin padded to a multiple of 32 (4 channels x KV=8) so a char4 load never
+// straddles a pixel; the extra channels and their weights are zero.
+static int pad_cin(int cin) { return (cin + 31) / 32 * 32; }
+
+static void do_conv(CL* c, const std::vector<int>& which, int iters, int do_verify) {
+    // first LDS variant that built — the conv kernel wants the 32-accumulator
+    // 64x64x32 t8x4 shape for the same reason the GEMM does
+    Variant* v = nullptr;
+    for (int vi : which) if (g_var[vi].prog && g_var[vi].kind == 0) { v = &g_var[vi]; break; }
+    if (!v) { p("CONV|no_variant"); return; }
+    p("CONV_VARIANT|%s|bm=%d|bn=%d|bk=%d|tm=%d|tn=%d", v->name, v->bm, v->bn, v->bk, v->tm, v->tn);
+
+    double tv_ms = 0.0;
+    double tv_macs = 0.0;
+    int ncls = 0;
+    for (int ci = 0; ci < NCONV; ++ci) {
+        const ConvClass& cc = CONV_CLASSES[ci];
+        const int CinP = pad_cin(cc.Cin), Cin4 = CinP / 4;
+        const int pad = (cc.s == 3) ? 1 : 0;
+        const int Wp = cc.W + 2 * pad, Hp = cc.H + 2 * pad;
+        const int nst = cc.taps * cc.s * cc.s;
+        const int M = cc.H * cc.W;
+        const size_t in_bytes = (size_t)cc.taps * Hp * Wp * CinP;
+        const size_t w_bytes = (size_t)cc.Cout * nst * CinP;
+        const size_t c_bytes = (size_t)M * cc.Cout * sizeof(int);
+
+        std::vector<signed char> hin(in_bytes, 0), hw(w_bytes, 0);
+        {   // random int8 in the real channels, zeros everywhere else
+            unsigned sd = 4242u + (unsigned)ci;
+            for (int t = 0; t < cc.taps; ++t)
+                for (int y = 0; y < Hp; ++y)
+                    for (int x = 0; x < Wp; ++x) {
+                        signed char* px = &hin[(((size_t)t * Hp + y) * Wp + x) * CinP];
+                        for (int ch = 0; ch < cc.Cin; ++ch) {
+                            sd = sd * 1664525u + 1013904223u;
+                            px[ch] = (signed char)((int)((sd >> 16) & 0xFF) - 128);
+                        }
+                    }
+            for (size_t i = 0; i < hw.size(); ++i) {
+                sd = sd * 1664525u + 1013904223u;
+                hw[i] = (signed char)((int)((sd >> 16) & 0xFF) - 128);
+            }
+            for (int n = 0; n < cc.Cout; ++n)
+                for (int st = 0; st < nst; ++st)
+                    for (int ch = cc.Cin; ch < CinP; ++ch)
+                        hw[((size_t)n * nst + st) * CinP + ch] = 0;
+        }
+        cl_int err = 0;
+        cl_mem inm = c->CreateBuffer(c->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                     in_bytes, hin.data(), &err);
+        if (!inm) { p("CONV|%s|ALLOC_FAIL_in|err=%d|bytes=%zu", cc.name, err, in_bytes); continue; }
+        cl_mem wm = c->CreateBuffer(c->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                    w_bytes, hw.data(), &err);
+        cl_mem outm = c->CreateBuffer(c->ctx, CL_MEM_READ_WRITE, c_bytes, nullptr, &err);
+        if (!wm || !outm) { p("CONV|%s|ALLOC_FAIL|err=%d", cc.name, err);
+            c->ReleaseMemObject(inm); if (wm) c->ReleaseMemObject(wm);
+            if (outm) c->ReleaseMemObject(outm); continue; }
+
+        cl_kernel k = c->CreateKernel(v->prog, "conv8_taps", &err);
+        if (!k) { p("CONV|%s|KERNEL_FAIL|%d", cc.name, err); continue; }
+        int aH = cc.H, aW = cc.W, aCin4 = Cin4, aCout = cc.Cout, as = cc.s, at = cc.taps, aM = M;
+        c->SetKernelArg(k, 0, sizeof(cl_mem), &inm);
+        c->SetKernelArg(k, 1, sizeof(cl_mem), &wm);
+        c->SetKernelArg(k, 2, sizeof(cl_mem), &outm);
+        c->SetKernelArg(k, 3, sizeof(int), &aH);
+        c->SetKernelArg(k, 4, sizeof(int), &aW);
+        c->SetKernelArg(k, 5, sizeof(int), &aCin4);
+        c->SetKernelArg(k, 6, sizeof(int), &aCout);
+        c->SetKernelArg(k, 7, sizeof(int), &as);
+        c->SetKernelArg(k, 8, sizeof(int), &at);
+        c->SetKernelArg(k, 9, sizeof(int), &aM);
+        const size_t lx = (size_t)(v->bn / v->tn), ly = (size_t)(v->bm / v->tm);
+        const size_t gx = (((size_t)cc.Cout + v->bn - 1) / v->bn) * lx;
+        const size_t gy = (((size_t)M + v->bm - 1) / v->bm) * ly;
+        size_t lsz[2] = {lx, ly}, gsz[2] = {gx, gy};
+
+        err = c->EnqueueNDRangeKernel(c->q, k, 2, nullptr, gsz, lsz, 0, nullptr, nullptr);
+        c->Finish(c->q);
+        int probe = 0;
+        cl_int r0 = c->EnqueueReadBuffer(c->q, outm, CL_TRUE, 0, sizeof(int), &probe, 0, nullptr, nullptr);
+        if (err) { p("CONV|%s|ENQ_FAIL|%d", cc.name, err); c->ReleaseKernel(k); continue; }
+        if (r0) {   // a faulted dispatch leaves the queue in error and every later
+                    // timing is enqueue overhead only — refuse to report it
+            p("CONV|%s|FAULT|read=%d(%s)|warmup", cc.name, r0, cl_err(r0));
+            c->ReleaseKernel(k); c->ReleaseMemObject(inm); c->ReleaseMemObject(wm);
+            c->ReleaseMemObject(outm); continue;
+        }
+
+        double t0 = now_ms();
+        void* ev = nullptr;
+        for (int i = 0; i < iters; ++i)
+            err = c->EnqueueNDRangeKernel(c->q, k, 2, nullptr, gsz, lsz, 0, nullptr,
+                                          (i == iters - 1) ? &ev : nullptr);
+        c->Finish(c->q);
+        if (ev) {
+            c->WaitForEvents(1, (const void**)&ev);
+            cl_int status = 12345; size_t sb = 0;
+            c->GetEventInfo(ev, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(status), &status, &sb);
+            if (status < 0) p("CONV_EXEC_ERR|%s|status=%d(%s)", cc.name, status, cl_err(status));
+            c->ReleaseEvent(ev);
+        }
+        cl_int r1 = c->EnqueueReadBuffer(c->q, outm, CL_TRUE, 0, sizeof(int), &probe,
+                                         0, nullptr, nullptr);
+        const double ms = (now_ms() - t0) / (double)iters;
+        if (r1) { p("CONV|%s|FAULT|read=%d(%s)|timed", cc.name, r1, cl_err(r1));
+                  c->ReleaseKernel(k); c->ReleaseMemObject(inm); c->ReleaseMemObject(wm);
+                  c->ReleaseMemObject(outm); continue; }
+
+        const double macs = (double)M * cc.Cin * cc.Cout * nst;     // real MACs, unpadded
+        const double layer_ms = ms * cc.frames;
+        const double cls_ms = layer_ms * cc.ops;
+        p("CONV|%s|H=%d|W=%d|Cin=%d|CinP=%d|Cout=%d|taps=%d|s=%d|frames=%d|ops=%d"
+          "|ms=%.3f|gops=%.2f|layer_ms=%.1f|cls_ms=%.1f|macs_G=%.3f",
+          cc.name, cc.H, cc.W, cc.Cin, CinP, cc.Cout, cc.taps, cc.s, cc.frames, cc.ops,
+          ms, macs / (ms * 1e6), layer_ms, cls_ms, macs / 1e9);
+        tv_ms += cls_ms; tv_macs += macs * cc.frames * cc.ops;
+        ++ncls;
+
+        // Exactness: the tiled kernel vs the scalar int32 reference on the SAME
+        // buffers. Run on the cheap classes (or a subset is enough) — a 3-tap 3x3
+        // case, a 1x1 case and the tiny-Cout tail.
+        if (do_verify && macs / 1e9 <= 10.0) {
+            cl_kernel kr = c->CreateKernel(v->prog, "conv8_ref", &err);
+            if (kr) {
+                std::vector<int> got((size_t)M * cc.Cout, 0), ref((size_t)M * cc.Cout, 0);
+                c->EnqueueReadBuffer(c->q, outm, CL_TRUE, 0, c_bytes, got.data(), 0, nullptr, nullptr);
+                cl_mem rbuf = c->CreateBuffer(c->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                              c_bytes, ref.data(), &err);
+                int bCin = cc.Cin, bCinP = CinP;
+                c->SetKernelArg(kr, 0, sizeof(cl_mem), &inm);
+                c->SetKernelArg(kr, 1, sizeof(cl_mem), &wm);
+                c->SetKernelArg(kr, 2, sizeof(cl_mem), &rbuf);
+                c->SetKernelArg(kr, 3, sizeof(int), &aH);
+                c->SetKernelArg(kr, 4, sizeof(int), &aW);
+                c->SetKernelArg(kr, 5, sizeof(int), &bCin);
+                c->SetKernelArg(kr, 6, sizeof(int), &bCinP);
+                c->SetKernelArg(kr, 7, sizeof(int), &aCout);
+                c->SetKernelArg(kr, 8, sizeof(int), &as);
+                c->SetKernelArg(kr, 9, sizeof(int), &at);
+                c->SetKernelArg(kr, 10, sizeof(int), &aM);
+                size_t rsz[2] = {(size_t)cc.Cout, (size_t)M};
+                double tr0 = now_ms();
+                cl_int rerr = c->EnqueueNDRangeKernel(c->q, kr, 2, nullptr, rsz, nullptr, 0, nullptr, nullptr);
+                c->Finish(c->q);
+                cl_int rd = c->EnqueueReadBuffer(c->q, rbuf, CL_TRUE, 0, c_bytes, ref.data(),
+                                                 0, nullptr, nullptr);
+                double rms = now_ms() - tr0;
+                long mism = 0; int first_bad = -1; long nzg = 0;
+                for (size_t i = 0; i < ref.size(); ++i) {
+                    if (got[i]) ++nzg;
+                    if (ref[i] != got[i]) { ++mism; if (first_bad < 0) first_bad = (int)i; }
+                }
+                // a zero output on random input means nothing executed — do not
+                // let "0 mismatches between two zero buffers" pass as MATCH
+                const char* verdict = (mism == 0 && nzg > 0) ? "MATCH" : "MISMATCH";
+                if (rerr || rd || nzg == 0) verdict = "UNVERIFIED";
+                p("CONVV|%s|%s|mismatch=%ld|first_bad=%d|ref=%d|got=%d|ms_ref=%.1f|enq=%d|rd=%d|nz_got=%ld",
+                  cc.name, verdict, mism, first_bad,
+                  first_bad >= 0 ? ref[first_bad] : 0, first_bad >= 0 ? got[first_bad] : 0,
+                  rms, rerr, rd, nzg);
+                c->ReleaseMemObject(rbuf);
+                c->ReleaseKernel(kr);
+            }
+        }
+        c->ReleaseKernel(k);
+        c->ReleaseMemObject(inm); c->ReleaseMemObject(wm); c->ReleaseMemObject(outm);
+    }
+    p("TV_MALI|classes=%d|total_s=%.3f|gops=%.1f|tmacs=%.1f",
+      ncls, tv_ms / 1000.0, tv_macs / (tv_ms * 1e6), tv_macs / 1e9);
+}
+
+
 int main(int argc, char** argv) {
     std::string mode = argc > 1 ? argv[1] : "all";
     std::string cl_path = argc > 2 ? argv[2] : "/data/local/tmp/gemm8.cl";
@@ -766,6 +965,7 @@ int main(int argc, char** argv) {
     if (iters < 1) iters = 1;
 
     if (mode == "diag") do_diag(&c, src);
+    if (mode == "conv") do_conv(&c, which, iters, argc > 6 ? atoi(argv[6]) : 1);
     if (mode == "peak") do_peak(&c, src, argc > 7 ? atoi(argv[7]) : 2000);
     if (mode == "verify" || mode == "all") do_verify(&c, src);
     if (mode == "bench" || mode == "all") do_bench(&c, which, iters);

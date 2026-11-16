@@ -54,6 +54,15 @@ def main() -> int:
     ap.add_argument("--cmd", default=None,
                     help="run THIS shell command after the gate passes instead of npu_host.py "
                          "(e.g. the T_V conv sweep); logged and timestamped like any other run")
+    ap.add_argument("--gate-slack", type=float, default=0.0,
+                    help="C added to the battery+3 gate to absorb sensor quantisation. The TPU "
+                         "zone on this phone reports in whole degrees (26.0 / 27.0) while battery "
+                         "resolves 0.1 C, so once the battery cools to ambient the gate lands "
+                         "between two sensor steps and a 0-slack gate flickers PASS/FAIL on a "
+                         "device that has not changed temperature at all. Use 1.0 for that case "
+                         "and say so in the doc; anything larger is a hot run.")
+    ap.add_argument("--confirm-samples", type=int, default=1,
+                    help="samples that must all pass before the run starts (default 1 = old behaviour)")
     args = ap.parse_args()
 
     LOG.write_text("", encoding="utf-8")
@@ -66,9 +75,11 @@ def main() -> int:
     t0 = time.time()
     while True:
         peak, batt, z = sample(serial)
-        gate = batt + 3.0
+        gate = batt + 3.0 + args.gate_slack
         stamp("zones " + " ".join(f"{k}={z[k]:.1f}" for k in GATE_KEYS if k in z)
-              + f" | peak={peak:.1f} gate={gate:.1f} ({'PASS' if peak <= gate else 'waiting'})")
+              + f" | peak={peak:.1f} gate={gate:.1f}"
+              + (f" (battery+3+{args.gate_slack:.1f} slack)" if args.gate_slack else "")
+              + f" ({'PASS' if peak <= gate else 'waiting'})")
         if peak <= gate:
             break
         if time.time() - t0 > args.max_wait:
@@ -76,12 +87,20 @@ def main() -> int:
             return 3
         time.sleep(args.poll)
 
-    time.sleep(10)  # settle, then confirm on a fresh sample
-    peak, batt, z = sample(serial)
-    gate = batt + 3.0
-    stamp(f"CONFIRM peak={peak:.1f} gate={gate:.1f}")
-    if peak > gate:
-        stamp("FATAL gate failed on confirm sample")
+    # Confirm on fresh samples: with a 1 C-quantised sensor a single confirm sample
+    # can land on the next step up and abort a device whose temperature did not move.
+    ok = True
+    for i in range(max(1, args.confirm_samples)):
+        time.sleep(10)
+        peak, batt, z = sample(serial)
+        gate = batt + 3.0 + args.gate_slack
+        stamp(f"CONFIRM[{i+1}/{max(1, args.confirm_samples)}] peak={peak:.1f} gate={gate:.1f}"
+              f" ({'PASS' if peak <= gate else 'FAIL'})")
+        if peak > gate:
+            ok = False
+            break
+    if not ok:
+        stamp("gate failed on confirm sample")
         return 3
 
     if args.cmd:

@@ -42,7 +42,7 @@ def sha256(p: Path) -> str:
 
 def parse(stdout: str) -> dict:
     rec = {"device": {}, "builds": [], "verify": [], "gemm": [], "block": [],
-           "f16": [], "fatal": []}
+           "f16": [], "conv": [], "conv_verify": [], "tv": None, "fatal": []}
     for raw in stdout.splitlines():
         line = raw.strip()
         if not line or line.startswith("=="):
@@ -88,6 +88,36 @@ def parse(stdout: str) -> dict:
                     k, _, v = kv.partition("=")
                     d[k] = v
                 rec["f16"].append(d)
+            elif tag == "CONV":
+                d = {"class": parts[1]}
+                for kv in parts[2:]:
+                    k, sep, v = kv.partition("=")
+                    if not sep:
+                        continue
+                    if k in ("H", "W", "Cin", "CinP", "Cout", "taps", "s", "frames", "ops"):
+                        d[k] = int(v)
+                    else:
+                        try:
+                            d[k] = float(v)
+                        except ValueError:
+                            d[k] = v
+                rec["conv"].append(d)
+            elif tag == "CONVV":
+                d = {"class": parts[1], "result": parts[2]}
+                for kv in parts[3:]:
+                    k, sep, v = kv.partition("=")
+                    if sep:
+                        d[k] = v
+                rec["conv_verify"].append(d)
+            elif tag == "TV_MALI":
+                d = {}
+                for kv in parts[1:]:
+                    k, _, v = kv.partition("=")
+                    try:
+                        d[k] = float(v)
+                    except ValueError:
+                        d[k] = v
+                rec["tv"] = d
             elif tag == "VERIFY_SUMMARY":
                 rec["verify_summary"] = parts[1]
         except (IndexError, ValueError):
@@ -138,6 +168,28 @@ def md_report(rec: dict) -> str:
             L.append(f"| `{f['variant']}` | {f.get('M')} | {f.get('N')} | {f.get('K')} | "
                      f"{f.get('ms')} | **{f.get('gops')}** |")
         L.append("")
+    if p["conv"]:
+        L += ["## VAE decode conv classes (implicit GEMM, one dispatch per class)", "",
+              "| class | HxW | Cin | Cout | taps | s | frames | ops | ms/frame | GOPS | layer ms | class ms |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for g in p["conv"]:
+            L.append(f"| `{g['class']}` | {g.get('H','')}x{g.get('W','')} | {g.get('Cin','')} | "
+                     f"{g.get('Cout','')} | {g.get('taps','')} | {g.get('s','')} | {g.get('frames','')} | "
+                     f"{g.get('ops','')} | {g.get('ms', 0):.3f} | **{g.get('gops', 0):.1f}** | "
+                     f"{g.get('layer_ms', 0):.1f} | **{g.get('cls_ms', 0):.1f}** |")
+        L.append("")
+        if p["tv"]:
+            t = p["tv"]
+            L += [f"**T_V (Mali) = {t.get('total_s', 0):.3f} s/chunk**, "
+                  f"{t.get('gops', 0):.1f} GOPS aggregate, {t.get('tmacs', 0):.1f} GMAC, "
+                  f"{int(t.get('classes', 0))} classes", ""]
+        if p["conv_verify"]:
+            L += ["### Exactness vs the int32 scalar reference", "",
+                  "| class | result | mismatch | ms (reference) |", "|---|---|---|---|"]
+            for v in p["conv_verify"]:
+                L.append(f"| `{v['class']}` | **{v['result']}** | {v.get('mismatch','')} | "
+                         f"{v.get('ms_ref','')} |")
+            L.append("")
     L += ["## Build log", "", "```"]
     for b in p["builds"]:
         L.append(f"{b['variant']}: {b['status']} {' '.join(b['detail'])}")
@@ -151,7 +203,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--mode", default="all",
-                    choices=["verify", "bench", "f16", "block", "peak", "diag", "all"])
+                    choices=["verify", "bench", "f16", "block", "peak", "diag", "conv", "all"])
     ap.add_argument("--variants", default="", help="comma-separated variant filter")
     ap.add_argument("--iters", type=int, default=5)
     ap.add_argument("--M", type=int, default=1530, help="block-mode token count")

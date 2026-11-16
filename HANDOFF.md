@@ -22,10 +22,10 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | Gate 2 (zero-copy) | **pass** on both routes; file-mmap route B preferred |
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
-| **VAE decode (`T_V`)** | **conv MACs measured, gate-compliant** → `docs/device/RESULTS_vae_tv.md`; 36 causal convs as `kT` shifted `CONV_2D` taps = **10.554 s/chunk**, 969.7 GOPS, 100 % of conv MACs (hot control run: 11.412 s). Mid-block attention (32.4 GMAC) still TBD; `T_V` is a lower bound until it lands |
+| **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) still unmeasured ⇒ `T_V` is a lower bound on both |
 | Gate 1 (artifact) | pending — quantiser not written yet (`phase1_quant/` has only the inspector) |
 | Gates 3–5 | pending |
-| Blocker | `T_V` needs a gate-compliant re-run + the mid-attention rate; co-run `T_G` unmeasured ⇒ `k_b*` still TBD (`T_N/T_G = 4.18×`) |
+| Blocker | mid-block VAE attention has no measured rate on either engine; co-run `T_G` unmeasured ⇒ `k_b*` still TBD (`T_N/T_G = 4.18×`, `T_V` TPU 10.554 s vs Mali 12.256 s) |
 
 ## The two results that changed the project
 
@@ -75,14 +75,14 @@ device network off — use `python tools/npu/cool_rerun.py`, never a bare timed 
 3. **Per-column scales vs the NPU stage.** `FULLY_CONNECTED` only takes per-tensor weight scales.
    Either the NPU graph uses per-tensor scales (measure the Gate 1/4 parity cost) or the NPU is
    restricted to shapes with an equivalent path. This touches `design_locks.json` → student's call.
-4. **`T_V` — VAE decode.** No `CONV_3D` in NNAPI: either decompose the causal 3D convs into
-   shifted 2D `CONV_2D` taps on the TPU, or decode on Mali in OpenCL. Measure both, report both.
-   → **TPU branch done 2026-11-15 18:25** (gate-compliant start, TPU 32.0 °C vs a 32.1 °C
-   gate): **10.554 s/chunk**, 969.7 GOPS, 100 % of the conv MACs
-   (`docs/device/RESULTS_vae_tv.md`; hot control 11.412 s). New NNAPI ceiling: batched
-   `CONV_2D` fails to compile above ~1 MB/frame. Still open: (a) the mid-block 3-D
-   attention (32.4 GMAC, 0.6 % of MACs) — no measured rate, so `T_V` is a lower bound;
-   (b) the Mali branch — needs a conv kernel over `gemm8.cl`; (c) then `T_V` is complete.
+4. **`T_V` — VAE decode.** ~~TPU branch done~~ **both branches now measured 2026-11-15**:
+   TPU `CONV_2D` taps **10.554 s/chunk** (969.7 GOPS, gate-compliant start) vs Mali
+   `conv8_taps` **12.256 s/chunk** (417.5 GOPS, TPU 26.0 °C start, 7/13 classes exact) ⇒
+   **the NPU is 1.16× faster at the decode**, the opposite ordering to the DiT block.
+   Still open: (a) the mid-block 3-D attention (32.4 GMAC, 0.6 % of MACs) — no measured
+   rate on either engine, so `T_V` is a lower bound both ways; (b) the Mali conv runs at
+   48 % of its own GEMM rate (378–486 vs 877 GOPS) because the activation tile is re-staged
+   per tap — a halo-staged tile is the next measurement, not a model.
 5. **Co-run `T_G`.** Two processes, one file-mapped artifact, GPU on blocks `[0,k)` while the
    NPU runs blocks `[k,180)` + decode. This is the number the cut is allowed to use.
 6. `python phase2_profile/solve_cut.py --Tg … --Tn … --Tv …` → commit the measured `k_b*`.
