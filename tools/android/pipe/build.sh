@@ -21,4 +21,4 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -W)"
 
 "$CMAKE" --build "$HERE/build"
 
-echo "built: $HERE/build/handoff_selftest"
+echo "built: $HERE/build/handoff_selftest $HERE/build/proc_a $HERE/build/proc_b"

@@ -166,10 +166,24 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    cache. Cut consequence reported, not applied: `k_b*` **157** (staging, period 25.55 s) / **148**
    (import, 31.75 s) vs the locked 160 / 23.61 s. Closure barrier measured **1.7 µs**; payload
    conversion is host-side and costs **44–57 ms/block** (removable with an fp16 epilogue kernel).
-   **NEXT TICK: P3.3 — `tools/android/pipe/proc_b.cpp`**, the NPU stage: wait on `seq`, run
-   `(180 - k)` blocks as the held-compilation FC graphs (the `corun` code path), then the decode stub,
-   publish `done`. **`ffn.down` has no NPU graph** at K=8960 — use the measured 7×K=1280 + 6×ADD
-   (`downsep`) or leave the down projection on Mali and say so.
+   **P3.3 DONE 2026-11-15 22:53** → `docs/device/RESULTS_proc_b_p33.md`: `tools/android/pipe/proc_b.cpp`
+   + `tools/pipe/proc_b.py` are the NPU stage — one `createFromFd` view of `block_00.bin` with
+   per-GEMM `setOperandValueFromMemory` windows, 9 held one-op graphs compiled in **4.52 s**,
+   **108/108 executes**, 3/3 chunks consumed, producer/consumer payload hash chain **MATCH**.
+   **The 9-GEMM stage is 381.1 ms/block (263 GOPS) — 0.976× the co-run 390.4 ms the cut uses,
+   measured through the real weights and the ring.** `ffn.down` both branches in the same
+   harness: TPU 7×K=1280+6×ADD **272.3 ms/block** vs Mali **47.33 ms** ⇒ **5.75× slower**
+   (whole NPU block 656.8 vs 390.5 ms). The TPU branch needs a 13,762,560 B weight repack
+   (row-major cannot be K-sliced) — **one-copy deviation, reported not adopted**. Handoff:
+   first chunk 0.163 µs, later chunks **queue** (consumer mid-block: 391–710 ms) — that is
+   back-pressure, not handoff cost. Thermal: `skip` started 0.2 °C over the floor gate
+   (table-floor, stated), `stage` 4.1 °C over (comparison only, not table-grade).
+   **NEXT TICK: P3.4 — `phase3_pipeline/stream.py`**, the coordinator: thermal gate → push →
+   launch `proc_a` and `proc_b` in the same `adb shell` with `setsid`, collect both `TS|` streams,
+   compute per-chunk period, publish→consume, GPU/NPU busy and the overlap fraction. Prove
+   **2 chunks** first. Launch shape: `proc_b --source none` with `proc_a` as the producer (the
+   `fork` producer is for standalone unit tests only), and `--nblocks` = `180 - k` from
+   `configs/rates_preset_a.json`.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.

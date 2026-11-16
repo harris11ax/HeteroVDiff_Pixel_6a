@@ -11,3 +11,9 @@ target_include_directories(handoff_selftest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}
 add_executable(proc_a proc_a.cpp)
 target_include_directories(proc_a PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../phase3_pipeline")
 target_link_libraries(proc_a dl log)
+
+# P3.3 — the NPU stage: the consumer side of the same ring, held FULLY_CONNECTED
+# graphs whose constant operands are windows into the same artifact file.
+add_executable(proc_b proc_b.cpp)
+target_include_directories(proc_b PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../phase3_pipeline")
+target_link_libraries(proc_b neuralnetworks)

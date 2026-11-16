@@ -23,6 +23,7 @@ __pycache__/
 docs/device/.measurement_in_flight
 docs/device/.cool_rerun.log
 docs/device/.conv_tv.log
+docs/device/*.raw.log
 
 # editors / OS
 .vscode/

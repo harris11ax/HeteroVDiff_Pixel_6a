@@ -67,9 +67,22 @@ struct SlotHdr {           // 64 B, one per slot
   **a fork for P3.4 to present, not to apply.**
   Open: payload conversion is host-side (44–57 ms/block) — an fp16 epilogue in
   `gemm8_tiled` removes it before any period number is quoted.
-- **P3.3 — NPU stage over real weights.** `tools/android/pipe/proc_b.cpp`: wait on
+- ~~**P3.3 — NPU stage over real weights.** `tools/android/pipe/proc_b.cpp`: wait on
   `seq`, run `(180 - k)` blocks as the held-compilation FC graphs (the `corun` code
-  path), then the decode stub, publish `done`.
+  path), then the decode stub, publish `done`.~~ — **done 2026-11-15 22:53** →
+  `docs/device/RESULTS_proc_b_p33.md`. Real artifact via one `createFromFd` view +
+  per-GEMM `setOperandValueFromMemory` windows (one stored copy), 9 held graphs
+  compiled in 4.52 s, **108/108 executes**, 3/3 chunks consumed, producer/consumer
+  payload hash chain **MATCH**. **The 9-GEMM stage measures 381.1 ms/block (263 GOPS)
+  — 0.976× the co-run 390.4 ms the cut was solved with, through real weights and the
+  ring.** `ffn.down` both branches priced in the same harness: TPU 7×K=1280+6×ADD
+  **272.3 ms** vs Mali **47.33 ms** ⇒ **5.75× slower** (whole block 656.8 vs 390.5 ms).
+  TPU branch needs a 13,762,560 B weight repack (row-major cannot be K-sliced) —
+  **reported as a one-copy deviation, not adopted**. Ring: first-chunk handoff 0.163 µs,
+  later chunks queue (consumer mid-block). Traps: word-vs-byte hash made the integrity
+  chain unmatchable; a one-tile buffer indexed `tiles×TILE` segfaults the consumer and
+  reads as `prod_slot_never_freed`. Thermal: `skip` started 0.2 °C over the floor gate,
+  `stage` 4.1 °C over (not table-grade — comparison only).
 - **P3.4 — coordinator.** `stream.py`: thermal gate → push → launch both with
   `setsid`, one `adb shell`, collect `TS|` lines, compute per-chunk period, publish→
   consume latency, GPU/NPU busy times, and the overlap fraction. Prove **2 chunks**.
