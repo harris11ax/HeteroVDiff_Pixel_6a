@@ -1,6 +1,11 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (05:05, **P3.8c — the VAE decode at a table-grade start: 592/592 `CONV_2D`
+*Updated 2026-11-16 (05:50, **P3.9 — `SA` is now measured, not declared: 1800 DiT scales
+(6 locked timesteps × 30 blocks × 10 GEMMs) + 36 VAE layer scales, and with **both operands INT8**
+the decoder still PASSes Gate 1 at **38.73 dB / 0.9672** against 40.22 dB weight-only ⇒ the
+activation path costs **1.48 dB** (`phase1_quant/calibrate.py`,
+`docs/device/RESULTS_calibrate.md`, `docs/device/RESULTS_gate1_actquant.md`).** Before that,
+**P3.8c — the VAE decode at a table-grade start: 592/592 `CONV_2D`
 executes in 8,834.7 ms (0.837× the plan's per-op sum) from a 24.0 °C start against a 24.1 °C gate,
 and the decode's `CONV_2D` class carries its own temperature term (+1.7 % median, +5.2 % worst,
 identical shapes early→late) that the FC stage does not; and **Gate 1's end-to-end PSNR/SSIM leg
@@ -34,7 +39,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **Mali INT8 GEMM** | **done** → `docs/device/RESULTS_gemm_mali.md`; 161.8 ms/block, 877 GOPS, exact vs int32 reference |
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound. The decode now also **executes** end-to-end off the INT8 artifact: **8,834.7 ms** of conv compute, 592/592 dispatches, table-grade start → `docs/device/RESULTS_vae_convseq.md` §P3.8c |
-| Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **End-to-end PSNR/SSIM leg now PASS** (2026-11-16 05:10, `phase1_quant/psnr_gate1.py`, capture `gate1_psnr_20261116_051022`): **40.22 dB / SSIM 0.9708** with all 36 decoder layers rebuilt from the INT8 artifact vs the fp32 reference (bar 28 dB / 0.92), 36/36 reconstructions reproduce the manifest's `rel_fro` to 4.5e-07; leaving the two 0.9974-cosine `time_conv` layers fp32 recovers **48.99 dB / 0.9962** ⇒ those two layers are the whole cost. **Weight-only** — activations still need `SA` from `calibrate.py` |
+| Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **End-to-end PSNR/SSIM leg now PASS** (2026-11-16 05:10, `phase1_quant/psnr_gate1.py`, capture `gate1_psnr_20261116_051022`): **40.22 dB / SSIM 0.9708** with all 36 decoder layers rebuilt from the INT8 artifact vs the fp32 reference (bar 28 dB / 0.92), 36/36 reconstructions reproduce the manifest's `rel_fro` to 4.5e-07; leaving the two 0.9974-cosine `time_conv` layers fp32 recovers **48.99 dB / 0.9962** ⇒ those two layers are the whole cost. **Weight-only** — and now also measured **with the INT8 activation operand** at the calibrated per-layer `SA`: **38.73 dB / 0.9672 PASS**, i.e. the activation half costs 1.48 dB / 0.0036 SSIM → `docs/device/RESULTS_gate1_actquant.md`, capture `gate1_psnr_20261116_054851` |
 | **Gate 3 (parity)** | **measured, FAILS as configured — but LOCALIZED and a passing recipe exists** → `docs/device/RESULTS_gate3_parity.md` + `docs/device/RESULTS_gate3_bisect.md`, tools `tools/pipe/gate3_parity.py`, `tools/pipe/gate3_bisect.py`, `proc_b --dump-parity/--probe-dir/--act`. The break is the **M (row) direction**: `N = 384` graphs are **100.00 % bit-exact (Δ = 0, 0 elements off by ≥2)** at `M = 1/8/128/160/192/200`, `N = 768` at `M = 128`, `N = 1536` at `M = 1`, on both `attn1.to_q` and `ffn.up`; the same 384-column graph at `M = 384` **will not compile** (`OP_FAILED`, ~58 ms). Wide graphs at `M = 256…384` return 25.8–50.7 %. So the fix Gate 3 proposed ("one graph per 384-column block") is the exact graph this compiler refuses, and the exact recipe is `N ∈ {128,384,768}` × `M ≤ 200` = **112 executes/block** instead of 9 at 384 tokens (**448 executes / 56 compilations at the stage's 1536 tokens; cost now measured in P3.7c**) |
 | Gates 4–5 | Gate 4 PASS (memory + one copy) |
 | **Exact recipe `T_N` (P3.7c)** | **measured** → `docs/device/RESULTS_tn_recipe.md`: the only bit-exact geometry (P3.7b) costs **0.7164 s/block** for the nine GEMMs = **1.90× the 377.8 ms 9-graph stage**, **140 GOPS** vs 265, at **56 compilations (8.64 s) / 448 executes** per block — and returns **448/448 tiles bit-exact (Δ = 0 LSB)**, `ffn.up`'s tail-128 block included, checked byte-wise against the artifact. 4 runs, 0.3 % spread. `solve_cut.py` on the measured pair: `k_b* = 166`, period **24.47 s (+3.6 %)** — **reported, not applied** (solo vs the locked co-run number) |
@@ -43,7 +48,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **Sustained `T_N`** | **measured** → `docs/device/RESULTS_sustain_npu.md`; 60 rounds × 9 GEMMs = **24.6 s of continuous TPU work, drift +0.35 %** (first-20 % 408.9 / last-20 % 410.3 ms per round, slope +0.03 ms/round) while the TPU zone rose 25.0 → 31.0 °C ⇒ **no derating over a full NPU stage**, so `T_N` carries no throttle term. Tool: `python tools/npu/sustain_npu.py` |
 | **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.61 s, 5.394× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
 | **Gate 4 (memory + one copy)** | **PASS twice** → `docs/device/RESULTS_gate4_p36.md`, tool `tools/pipe/gate4.py`, captures `gate4_20261116_003217` / `…_003411`. PSS A+B peak **282.8 MB (0.27 GiB) vs the 2.2 GiB budget — 8.2× headroom** (A 246.9 MB median, B 30.9 MB). `proc_a`: **one `rw-s` MAP_SHARED view** of the 46,399,488 B block at offset 0, **10/10** windows imported by reference. `proc_b`: one fd, handed to `createFromFd`, **0 mappings** of its own. **Trap: `smaps` under-reports the GPU stage 2.93×** (`Pss` 85,137 kB vs `dumpsys` TOTAL 249,290 kB — the 164,192 kB `GL mtrack` row is driver-accounted CL memory and is absent from `/proc/<pid>/smaps`) ⇒ quote `dumpsys`, never `smaps`, for Mali |
-| Blocker | every rate the cut needs is now measured on both engines **and checked for sustained drift** — the mid-block VAE attention closed 2026-11-15 21:2x, the 24.6 s sustained soak 21:41. What is still unrun: the Gate-1 end-to-end PSNR/SSIM leg and `calibrate.py` — **environment resolved 2026-11-15 (commit `8663c3f`): use `.venv-ref/Scripts/python.exe`** (torch 2.15.0+cpu, diffusers 0.43.0, transformers 5.23.0, deliberately NOT `.venv-quant` because this cron fires every 15 min in this tree). Measured fp32 GEMM 4096³ = 449.9 GFLOPS, so a 36.0 TFLOP 9-frame reference chunk is ~1.3 min. **Gate 4 is built and PASSing**; what remains of Gates 3–5 is Gate 3's numerical parity, the decode as an execution, and Gate 5 |
+| Blocker | every rate the cut needs is now measured on both engines **and checked for sustained drift** — the mid-block VAE attention closed 2026-11-15 21:2x, the 24.6 s sustained soak 21:41. What is still unrun: **nothing host-only** — the Gate-1 PSNR/SSIM leg and `calibrate.py` both landed 2026-11-16 (40.22 dB weight-only, 38.73 dB with the INT8 activation operand; 1800 + 36 measured scales) — **environment resolved 2026-11-15 (commit `8663c3f`): use `.venv-ref/Scripts/python.exe`** (torch 2.15.0+cpu, diffusers 0.43.0, transformers 5.23.0, deliberately NOT `.venv-quant` because this cron fires every 15 min in this tree). Measured fp32 GEMM 4096³ = 449.9 GFLOPS, so a 36.0 TFLOP 9-frame reference chunk is ~1.3 min. **Gate 4 is built and PASSing**; what remains of Gates 3–5 is Gate 3's numerical parity, the decode as an execution, and Gate 5 |
 
 ## The two results that changed the project
 
@@ -445,6 +450,33 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  comparable to the 40.22 dB weight-only number). Each decoder pass is 30.5 s on `.venv-ref`, so the
  whole 36-layer sweep is minutes. Then wire `proc_b --decode 1` to call `convseq` instead of printing
  the reference, then Gate 5 (≥10 chunks with the decode in it).**
+ **P3.9 DONE 2026-11-16 05:49 — `calibrate.py` exists, so `SA` is measured and the INT8
+ activation path has a number** → `phase1_quant/calibrate.py`, `docs/device/RESULTS_calibrate.md`
+ (scales in the gitignored `artifacts/calib/act_scales_{vae,dit}_20261116_0540*.json`), and
+ `docs/device/RESULTS_gate1_actquant.md` (capture `gate1_psnr_20261116_054851`). Host-only, FP32
+ forwards in `.venv-ref`. **DiT: 1800 scales** = 6 locked timesteps × 30 blocks × 10 base GEMMs at
+ M = 1530 with **real umT5-XXL** conditioning (bf16, 512 tokens, 87 s; 15.3 s per step). SA
+ 0.002466 … 0.286219; **1261/1800 instances exceed the nominal `1/127`** (`attn2.to_q` 18.8×,
+ `ffn.net.2` 5.5×) and 539 sit below it (`attn2.to_out` 0.50×), so no single activation scale is
+ even directionally right. Two consistency proofs fell out rather than being asserted:
+ `attn2.to_k` == `attn2.to_v` == **0.005011 in all 180 instances** (one RMS-normalised cross-attn
+ context) and `attn1.to_q/_k/_v` agree exactly (one shared input). Hidden-state max|x| peaks at
+ **359.04 vs the fp16 ceiling 65504 ⇒ 182× headroom**, so the lock's "fp16 residual + per-GEMM
+ calibrated input scale" needs no narrower term. A *static* per-GEMM max costs up to **7.65×** of
+ resolution, which is why the table is per (step, block, GEMM). **VAE: 36/36 layers** measured on
+ the very tensors the artifact's taps consume (max kept across the decode's frame chunks, 2–3
+ calls/layer). SA 0.004822 … 0.252453 ⇒ **34 of 36 layers need a LARGER scale than the nominal
+ `1/127`** (median 4.94×, worst **32.06×** on `up_blocks.1.resnets.0.conv_shortcut`), 2 need
+ smaller — i.e. the P3.8b/P3.8c `convseq` walks were clipping on 34 of 36 layers, which is the
+ measured reason they "execute but do not decode". **Consequence for Gate 1:**
+ `psnr_gate1.py --act-scales` now runs the decode with **both operands INT8** →
+ **38.73 dB / SSIM 0.9672 PASS** vs weight-only **40.22 dB / 0.9708** (reproduced to 2 dp ⇒ the leg
+ is deterministic): the activation operand costs **1.48 dB / 0.0036 SSIM**, concentrated on the
+ frames with the most headroom (f0 −9.47 dB, steady-state f4–f8 −0.34…−1.23 dB). No device rate
+ touched; `T_N`/`T_G`/`T_V`/`k_b*` unchanged. **NEXT ACTION: (a) wire `SA` into the device — the
+ per-layer table + INT32 bias in `SA*SW` units (it is FP32 and flagged `quantised: false` for
+ exactly this reason) so `convseq` stops using `1/127`; (b) `proc_b --decode 1` calls `convseq`
+ instead of printing 10.640 s; (c) Gate 5, ≥10 chunks with the decode in it.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
@@ -515,6 +547,26 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   that every one resolves to the same path and that only one file of that size exists on
   the device (a leftover T_N-era `hv_block_int8.bin` broke the one-copy claim until it was
   deleted).
+Host-side model traps (paid for 2026-11-16, `phase1_quant/calibrate.py`):
+
+- **The DCM checkpoint is not a stock diffusers state dict.** Every attention/ffn projection is
+  peft-wrapped: `blocks.N.attn1.to_q.base_layer.weight` (480 such tensors) plus 480
+  `lora_A`/`lora_B` expert factors. `from_pretrained` cannot load it; build from
+  `WanTransformer3DModel.from_config`, strip `.base_layer`, drop the LoRA keys, and **assert
+  `missing == 0`** — that is what proves the mapping. The only unexpected tensors are the 12
+  `condition_embedder_lora.*` (DCM's text-embedder LoRA, deliberately not applied).
+- **`scheduler.set_timesteps(n)` is not the DCM schedule.** For the locked 6-step run it returns
+  `[999, 937, 857, 750, 600, 376]`, not `[1000, 992, 982, 949, 905, 810]`; its *sigma* convention
+  is the plain rectified-flow identity `sigma = t/1000` (measured to 1e-3). Use the locked
+  timesteps and derive sigma from the identity.
+- **umT5-XXL is 22.7 GB fp32 on disk.** Load it bf16 (11 GB) **before** the DiT and free it —
+  28 s to load, 87 s for a 512-token encode on 6 CPU threads; co-resident with the 5.7 GiB
+  transformer it is an avoidable 17 GB peak.
+- **`AutoencoderKLWan.decode` is iterative** — it walks the latent with cached conv state, so one
+  decoder layer fires **2–3 times per decode**, at 1-frame shapes. A calibration hook that
+  *assigns* keeps only the last chunk (caught in the first attempt); it must accumulate the max.
+  Built-in invariance check: `attn2.to_k`/`to_v` read the same RMS-normalised cross-attn context,
+  so their SA is identical to the last digit in all 180 (step, block) instances.
 - **A `FULLY_CONNECTED` output is only partly the GEMM.** Measured 2026-11-16
   (`RESULTS_gate3_parity.md`): **25.8 %** of each `[384, N]` output tile is bit-exact
   against exact integer accumulation — the **last 384-column block** for every row and
