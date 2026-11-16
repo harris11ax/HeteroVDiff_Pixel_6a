@@ -1,7 +1,7 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (02:31, **P3.7e — the pass-major recipe is exact at 448/448 tiles *and* 9.7 %
-cheaper: 646.7 ms/block, and P3.7d's "contention is a non-event" does not survive it**). This
+*Updated 2026-11-16 (03:14, **P3.7h/P3.7i — the network costs nothing, the "11 %" is a reboot, the
+execution order costs nothing, and the block time depends on its *start* temperature**). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
 `docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
@@ -313,12 +313,6 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  System32 before PATH ⇒ the build silently never ran, rc 127), now routed through
  `probe_host.bash_bin()` for every tool; and a single confirm sample no longer aborts a floor-grade
  run (it re-enters the wait loop).
- **NEXT ACTION: (a) the network A/B (host-cheap, ~25 s of device time): at the
- floor with the device **network ON**, `python tools/pipe/tn_recipe.py --reps 8`. 707 ms ⇒ background
- load inflates per-execute wall time (and every rate measured with the network on carries ~10 %);
- ~647 ms ⇒ the 02:09 numbers were a device-state artifact; (b) `ffn.down` under contention (0.2580 s
- downsep still solo); (c) the real Phase-3 remainder: `--decode 1` is still a no-op stub, Gate 1's
- PSNR/SSIM leg and `calibrate.py` are the host-only work, Gate 5 is unrun.**
  **P3.7f DONE 2026-11-16 02:38 — the solo rate is settled and does not derate in 26→33 °C** →
  `RESULTS_tn_recipe.md` §P3.7f, capture `tn_recipe_20261116_023810` (40 passes, gate PASS at
  TPU 26.0): **647.93 ms** steady median (n=39, stdev 1.76 ms, 643.8–651.7 = 1.23 % spread),
@@ -343,6 +337,30 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    `RESULTS_stream_p35.md` (32.72 s period) carry ~10 % too — hence next action (a).
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
+ **P3.7h DONE 2026-11-16 03:00 — (a) closed: the network costs nothing, and the "11 %" is a *reboot*
+ → `RESULTS_tn_recipe.md` §P3.7h, capture `tn_recipe_20261116_025927` (Wi-Fi associated **and
+ validated**, 2/2 ping 0 % loss, gate PASS at TPU 25.0): **639.44 ms** steady (n = 7, stdev 2.82) —
+ 1.1 % *cheaper* than P3.7e's 646.69 and 1.3 % cheaper than P3.7f's 647.93, both network-**off**. So
+ background connectivity does not inflate the 448 executes and the **32.72 s stream period carries no
+ network term**. `T_N` = 0.6394 + 0.2580 downsep = **0.8974 s** ⇒ k_b* = 165, 24.32 s.
+ `/proc/uptime` (2,852.67 s at 03:10) puts the boot at **02:22:27**, and every exact-recipe capture
+ sorts perfectly by it — **pre-boot 700–717 ms** (716.4 / 710.3 / 707.0 / 700.5), **post-boot
+ 636–651 ms** (646.7 / 647.9 / 635.8 / 639.4) ⇒ the 11 % is **boot-to-boot device state**, not
+ contention, not heat, not load. Consequence: **P3.7e's "pass-major is 9.7 % cheaper" is retracted
+ as an order effect** (it compared a post-boot number with a pre-boot one).**
+ **P3.7i DONE 03:14 — same-boot order A/B: the order costs nothing** → new flag
+ `proc_b --recipe-order pass|gemm` (both orders hold all 56 graphs; only the loop nesting differs) +
+ `tn_recipe.py --order`; captures `…_031159` (gemm) / `…_031414` (pass): **649.52 ms** vs
+ **651.23 ms** at starts 1 °C apart — 0.26 %, inside the 1.5 % within-run spread. Same five post-boot
+ points also give the recipe a **start**-temperature term: 639.4 @ TPU 25.0, 647.9 @ 26.0, 646.7 @ 27.0,
+ 651.2 @ 31.0, 649.5 @ 32.0 = **1.8 % across 7 °C (+0.15 %/°C)**, versus **+0.16 % within** a run
+ (P3.7f) — the start sets the regime, the run does not drift. k_b* = 165 at both ends (0.8974 / 0.9095
+ s), lock untouched. **Quote a block time with its start temperature.**
+ **NEXT ACTION: (a) `ffn.down` under contention** — the 0.2580 s downsep is the **last solo term** in
+ the exact `T_N`, and `co_recipe_device.sh` runs `--down skip`, so this needs a downsep arm in the
+ co-run harness plus a contended reference; (b) then the real Phase-3 remainder: `--decode 1` is still
+ a no-op stub, Gate 1's PSNR/SSIM leg and `calibrate.py` are host-only work, and Gate 5 (the
+ ≥10-chunk end-to-end run) is unrun.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
@@ -430,6 +448,18 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   in time, which is what lets a pass be classified as "ran alone" vs "ran while the GPU was busy".
   P3.7c freed each GEMM's slots before compiling the next, which forced gemm-major order and made
   every pass span the whole run — the same numbers (710.3 vs 716.4 ms solo) but unclassifiable.
+- **Device rates are bounded by the boot and by the start temperature** (measured 2026-11-16,
+  `RESULTS_tn_recipe.md` §P3.7h/§P3.7i). `/proc/uptime` showed a reboot at 02:22:27 that splits every
+  exact-recipe capture cleanly: **pre-boot 700–717 ms, post-boot 636–651 ms** for the same binary,
+  block and geometry. So (a) quote the boot / session with every rate, and (b) never compare a number
+  taken before a reboot with one taken after — that is what broke P3.7e's "pass-major is 9.7 %
+  cheaper" (the real order effect is **0.26 %**, measured same-boot with
+  `proc_b --recipe-order pass|gemm`). Within one boot the block also tracks its **start** temperature
+  (+0.15 %/°C over a 25→32 °C start) even though a running pass barely drifts (+0.16 % over 26→33 °C).
+- **A load experiment must be started AFTER the thermal gate opens, inside the same device command
+  as the measurement.** Four `yes` loops at 108 % each (464 % of 800 % CPU) launched *before* the gate
+  drove TPU 25 → **56 °C** and skin2 to 43.5 in under a minute; the gate then refused for 420 s and no
+  artifact was written (measured 2026-11-16). Gate → load → measure, in one `adb shell`.
 
 ## Definition of done for the course project
 
