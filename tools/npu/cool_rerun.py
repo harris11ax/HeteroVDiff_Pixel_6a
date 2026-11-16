@@ -73,35 +73,49 @@ def main() -> int:
     stamp(f"START cool-rerun serial={serial} max_wait={args.max_wait:.0f}s poll={args.poll:.0f}s")
 
     t0 = time.time()
+    # Wait for a PASS sample, then confirm it on fresh samples. A failed confirm must
+    # RE-ENTER the wait loop, not abort: the TPU zone reports in whole degrees and
+    # VIRTUAL-SKIN spikes ~3 C for a single sample every few minutes, so a confirm can
+    # fail on a device that has not changed temperature at all. (Before 2026-11-16 this
+    # path returned 3 immediately, which threw away a 17-minute cool-down; the doc in
+    # HANDOFF claimed it re-entered. It does now.)
+    confirms_failed = 0
     while True:
-        peak, batt, z = sample(serial)
-        gate = batt + 3.0 + args.gate_slack
-        stamp("zones " + " ".join(f"{k}={z[k]:.1f}" for k in GATE_KEYS if k in z)
-              + f" | peak={peak:.1f} gate={gate:.1f}"
-              + (f" (battery+3+{args.gate_slack:.1f} slack)" if args.gate_slack else "")
-              + f" ({'PASS' if peak <= gate else 'waiting'})")
-        if peak <= gate:
+        while True:
+            peak, batt, z = sample(serial)
+            gate = batt + 3.0 + args.gate_slack
+            stamp("zones " + " ".join(f"{k}={z[k]:.1f}" for k in GATE_KEYS if k in z)
+                  + f" | peak={peak:.1f} gate={gate:.1f}"
+                  + (f" (battery+3+{args.gate_slack:.1f} slack)" if args.gate_slack else "")
+                  + f" ({'PASS' if peak <= gate else 'waiting'})")
+            if peak <= gate:
+                break
+            if time.time() - t0 > args.max_wait:
+                stamp(f"GAVE UP after {time.time() - t0:.0f}s: peak={peak:.1f} > gate={gate:.1f};"
+                      f" no timed run ({confirms_failed} confirm miss(es))")
+                return 3
+            time.sleep(args.poll)
+
+        # Confirm on fresh samples: a 1 C-quantised sensor can land on the next step up.
+        ok = True
+        for i in range(max(1, args.confirm_samples)):
+            time.sleep(10)
+            peak, batt, z = sample(serial)
+            gate = batt + 3.0 + args.gate_slack
+            stamp(f"CONFIRM[{i+1}/{max(1, args.confirm_samples)}] peak={peak:.1f} gate={gate:.1f}"
+                  f" ({'PASS' if peak <= gate else 'FAIL'})")
+            if peak > gate:
+                ok = False
+                break
+        if ok:
             break
+        confirms_failed += 1
+        stamp(f"confirm miss #{confirms_failed} (peak={peak:.1f} gate={gate:.1f})"
+              f" — re-entering the wait loop, not aborting")
         if time.time() - t0 > args.max_wait:
-            stamp(f"GAVE UP after {time.time() - t0:.0f}s: peak={peak:.1f} > gate={gate:.1f}; no timed run")
+            stamp(f"GAVE UP after {time.time() - t0:.0f}s: {confirms_failed} confirm miss(es); no timed run")
             return 3
         time.sleep(args.poll)
-
-    # Confirm on fresh samples: with a 1 C-quantised sensor a single confirm sample
-    # can land on the next step up and abort a device whose temperature did not move.
-    ok = True
-    for i in range(max(1, args.confirm_samples)):
-        time.sleep(10)
-        peak, batt, z = sample(serial)
-        gate = batt + 3.0 + args.gate_slack
-        stamp(f"CONFIRM[{i+1}/{max(1, args.confirm_samples)}] peak={peak:.1f} gate={gate:.1f}"
-              f" ({'PASS' if peak <= gate else 'FAIL'})")
-        if peak > gate:
-            ok = False
-            break
-    if not ok:
-        stamp("gate failed on confirm sample")
-        return 3
 
     if args.cmd:
         stamp("RUN " + args.cmd)

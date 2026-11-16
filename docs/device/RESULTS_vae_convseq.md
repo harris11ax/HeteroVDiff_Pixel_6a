@@ -101,10 +101,99 @@ assertion before any device time was spent.
 `argv[5]`, so `--layers 2` ran all 36. Harmless here (the full run is the deliverable) but it makes
 a prefix run silently a full run; arg positions now agree.
 
+## P3.8c — the table-grade cool run, and the decode's own temperature term
+
+Capture `docs/device/vae_seq_cool_20261116_045856.json` (tool `tools/npu/vae_seq.py --run --out
+vae_seq_cool`, launched through `tools/npu/cool_rerun.py`). **Start peak 24.0 °C against a
+`battery+3` of 24.1 °C** (TPU 24.0, skin1 22.07, skin2 22.42, VIRTUAL-SKIN 21.9, battery 21.1) →
+**table-grade on the strict zero-slack rule**, which is what the P3.8b run missed by 0.9 °C.
+The tool was passed `--gate-slack 1.0` because its own gate was flickering between 24.1 and 25.1
+(a cold battery plus a 1 °C-quantised TPU zone); the run then started *below* the zero-slack gate,
+so no slack was actually spent and none is claimed.
+
+| quantity | P3.8b (0.9 °C over gate) | **P3.8c (table-grade)** | vs plan |
+|---|---|---|---|
+| executes | 592 / 592 | **592 / 592** | = `total_executes_per_chunk` |
+| compute, sum of per-dispatch walls | 9,065.3 ms | **8,834.7 ms** (−2.5 %) | **0.837×** the 10,554.4 ms per-op sum |
+| aggregate rate | 564.6 GMAC/s (= 1,129 GOPS at 2 ops/MAC) | **579 GMAC/s (= 1,158 GOPS)** | plan 485 GMAC/s |
+| walk (loops + harness epilogue) | 24.622 s | **24.365 s** | — |
+| harness epilogue inside the walk | 15,557 ms (63 %) | **15,530 ms (64 %)** | — |
+| compile | 18.56 s, 186 ms/graph | **18.64 s, 186 ms/graph** | — |
+| process wall | 43.182 s | **43.003 s** | — |
+| end-of-run zones | TPU 41.0 | TPU 41.0, skin2 28.61, VIRTUAL-SKIN 24.89 | — |
+
+**Unit note, because the two docs disagree by exactly 2×.** The artifact's `macs` field sums to
+5,117,308,600,320 (5,117.3 GMAC) and its `gops` field is MAC/s; the P3.8b table's 1,129 "GOPS"
+counts 2 ops per MAC (1,129 = 2 × 564.6). Both are the same measurement — 579 GMAC/s **is**
+1,158 GOPS in that convention. Quote the convention, or quote MAC/s.
+
+### Per-layer agreement, measured again at the floor
+
+Per-plane ratio of measured execute time to the plan's per-op sum (execute-only stamps, n = 36):
+
+| latent plane | layers | exec / plan (P3.8c) | P3.8b |
+|---|---|---|---|
+| 34×60 (384 ch) | 12 | **1.285** | 1.294 |
+| 68×120 | 9 | **0.957** | 0.943 |
+| 136×240 | 7 | **0.774** | 0.761 |
+| 272×480 (96 ch) | 8 | **0.825** | 0.876 |
+
+Per-layer range 0.735–1.671 (P3.8b 0.740–1.775). The small planes pay a fixed dispatch overhead
+(the graph is ~1.4 ms of work behind an ~0.9 ms dispatch); the large planes beat the plan. The two
+runs agree within 6 % per plane, so the per-layer structure is a property of the shapes, not of the
+thermal start.
+
+### NEW: the decode's `CONV_2D` class is not drift-free
+
+The FC stage was soaked and came back flat (+0.35 % over 24.6 s, `RESULTS_sustain_npu.md`). The
+decode had never been checked. It can be checked for free from the timestamped dispatches by
+comparing **identical-shape layers early vs late** in the same walk (TPU 24 → 41 °C, 42.7 s of device
+activity = 18.6 s of interleaved compilation + 24.4 s of execution):
+
+| shape (frames, cin, cout, h, w, taps) | first layer | last layer | last / first | separation |
+|---|---|---|---|---|
+| (3, 384, 384, 34, 60, 3) | L1 3.19 ms | L10 3.16 ms | **0.992** | 4.1 s |
+| (5, 384, 384, 68, 120, 3) | L14 10.22 ms | L19 10.37 ms | **1.015** | 3.6 s |
+| (9, 192, 192, 136, 240, 3) | L22 14.32 ms | L27 14.59 ms | **1.018** | 7.5 s |
+| (9, 96, 96, 272, 480, 3) | L29 23.41 ms | L34 24.63 ms | **1.052** | 15.3 s |
+
+Median **+1.7 %**, worst **+5.2 %** on the largest plane — a monotonic rise with elapsed time and
+plane size, unlike the FC stage. Caveats stated rather than smoothed: four pairs only, and a
+pair also differs in position in the sequence (allocator/cache state), so this localizes a real
+end-of-run cost without separating thermal from state. **Consequence: quote a decode time with its
+start temperature**, and treat the 2.5 % between P3.8b and P3.8c as run-to-run spread rather than a
+thermal trend (both ended at TPU 41.0, starts 1 °C apart).
+
+### What this does to the cut (reported, not applied)
+
+The measured conv execution is **16.3 % cheaper than the plan's per-op sum that `T_V` = 10.640 s was
+built from** (0.837×). Re-solving `solve_cut.py` with the locked co-run `T_G`/`T_N` and
+`T_V` = 8.8347 (convs) + 0.0855 (Mali attention) = **8.920 s**:
+
+| | `k_b*` | period | vs NPU-only |
+|---|---|---|---|
+| plan `T_V` 10.640 s (as locked) | 165 | 24.32 s | 7.03× |
+| **measured decode 8.920 s** | **163** | **24.06 s** | 7.03× |
+
+The decode getting 16 % cheaper moves the cut by **2 blocks and 1.1 % of period** — `T_V` is only
+~20 % of the period, so the cut is insensitive to it. `configs/design_locks.json` still says 160;
+this is a comparison, not an edit. The same caveat as P3.8b applies: residual/shortcut adds, SiLU
+and the temporal-shuffle offset are not wired, so both numbers are conv-only.
+
+### Harness defect that cost this run 17 minutes
+
+`cool_rerun.py`'s confirm-sample path did `return 3` — it **aborted** on a single failed confirm
+sample while the handoff (P3.7e) claimed it re-entered the wait loop. The 04:39 launch cooled for
+17 min, took one PASS sample (peak 24.0 = gate 24.0) and threw it away on the next sample, because
+the TPU zone is 1 °C-quantised and VIRTUAL-SKIN spikes ~3 °C for one sample every few minutes.
+Fixed: a confirm miss now re-enters the wait loop and counts against `--max-wait`. Both the
+quantisation and the VIRTUAL-SKIN transient are now recorded where the gate lives.
+
 ## Next
 
-1. **Cool re-run for a table-grade start** (`cool_rerun.py --cmd "python tools/npu/vae_seq.py
-   --run --out vae_seq_cool"`): the mechanism-grade run started 0.9 °C over the gate.
+1. ~~**Cool re-run for a table-grade start**~~ — **done 2026-11-16 04:58:56**, capture
+   `vae_seq_cool_20261116_045856`: 8,834.7 ms of compute at a 24.0 °C start vs a 24.1 °C gate
+   (§P3.8c above).
 2. `--decode 1` in `proc_b` can now call this same walk instead of printing the reference.
 3. Parity still needs `SA` per layer from `calibrate.py` (FP32 forward through the decoder) plus
    the residual wiring — that is the difference between "executes" and "decodes".
