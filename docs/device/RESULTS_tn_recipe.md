@@ -223,3 +223,85 @@ the TPU is still near the floor, so contention and heat are separable *within on
 first contended pass jumps straight to ~700 ms, that is contention; if the jump tracks the TPU zone
 crossing ~40 °C, that is thermal. `--delay` must be long enough to bank floor-grade solo passes
 (≥ 6 s), and `--reps` long enough to walk the temperature range (≥ 24).
+
+## P3.7h — the network A/B: connectivity does **not** inflate the pass, and the 11 % was a *reboot*
+
+Capture `tn_recipe_20261116_025927`, `python tools/pipe/tn_recipe.py --reps 8`. Same binary
+(pass-major), same geometry: row 192 / col 384 / 1536 tokens / **56 graphs / 448 executes per pass**.
+
+Network state read off the device, not assumed: `airplane_mode_on = 0`; Wi-Fi **associated and
+validated** (`NetworkAgentInfo … WIFI CONNECTED … IS_VALIDATED`, 11ax band 2, RSSI −45 dBm, link
+720 Mbps); `ping -c 2 8.8.8.8` → **2/2, 0 % loss**, 72 / 447 / 822 ms min/avg/max. Thermal gate
+**PASS at the floor**: TPU **25.0** · skin1 23.2 · skin2 23.6 · battery 22.2, gate 26.2, two confirms
+at 25.0.
+
+| quantity | value |
+|---|---|
+| pass 1 | 650.42 ms |
+| steady (passes 2–8) | **639.44 ms** median, mean 640.41, n = 7, stdev 2.82 |
+| spread across those 7 | 636.48 – 646.07 ms (**1.5 %**) |
+| all 8 passes | median 640.35, stdev 4.23 |
+| vs the 377.8 ms 9-graph stage | **1.69×**, 156.8 GOPS |
+| compile | 9,517 ms for 56 graphs |
+| per-GEMM | eight 1536-wide GEMMs **45.59–45.97 ms** (158–159 GOPS); `ffn.up` **272.65 ms** (155 GOPS) |
+
+Against the three network-**off** floor starts:
+
+| run | network | start TPU | steady block |
+|---|---|---|---|
+| P3.7e `tn_recipe_…_023152` | off | 27.0 | 646.69 ms |
+| P3.7f `tn_recipe_…_023810` (n = 39) | off | 26.0 | 647.93 ms |
+| **P3.7h `tn_recipe_…_025927`** | **on** | **25.0** | **639.44 ms** |
+
+**The network does not inflate the pass — it reads 7.3 ms (1.1 %) *cheaper* than P3.7e and 8.5 ms
+(1.3 %) cheaper than P3.7f.** Two things follow: the hypothesis that background connectivity inflates
+the 448 synchronous executes is not supported, and the **32.72 s** steady-state period in
+`RESULTS_stream_p35.md` carries **no network-inflation term** to correct for.
+
+Limitation, stated plainly: "network on" here means associated, validated and reachable; `top -n 1 -b`
+read **793 % of 800 % CPU idle** during the check, so no background sync was actually in flight. The
+sharper version (forced CPU contention *during* the pass) was attempted and mis-designed — see below.
+
+### The 11 % is a boot boundary: every sub-707 number is post-boot
+
+`/proc/uptime` at 03:10 = 2,852.67 s ⇒ this device booted at **02:22:27**. Sorting every exact-recipe
+capture by that instant splits them perfectly:
+
+| capture | time | boot | steady block |
+|---|---|---|---|
+| `tn_recipe_…_013625` (P3.7c, gemm-major) | 01:36 | **pre** | 716.4 ms |
+| `tn_recipe_…_020353` (P3.7d sanity, pass-major) | 02:03 | **pre** | 710.3 ms |
+| `corun_recipe_…_020926` (P3.7d) | 02:09 | **pre** | 707.0 / 700.5 ms |
+| `tn_recipe_…_023152` (P3.7e) | 02:31 | post | 646.7 ms |
+| `tn_recipe_…_023810` (P3.7f) | 02:38 | post | 647.9 ms |
+| `corun_recipe_…_024049` (P3.7g, contended) | 02:40 | post | 635.8 ms |
+| `tn_recipe_…_025927` (P3.7h) | 03:00 | post | **639.4 ms** |
+
+Every pre-boot reading is **700–717 ms**; every post-boot reading is **636–648 ms**. The ~10 % gap is
+not thermal (P3.7g walked 26 → 45 °C flat), not contention (P3.7g: 635.8 contended vs 646.7 solo) and
+not the network (above). It tracks **the boot**.
+
+**Consequence — a committed claim is confounded and is marked as such here:** P3.7e's "pass-major is
+**9.7 % cheaper** than P3.7c's gemm-major 716.4 ms" compares a **pre-boot** gemm-major number with a
+**post-boot** pass-major one. The two orders have never been measured inside one boot, so 9.7 % is
+**not established as an order effect**. What survives from P3.7e is everything measured wholly
+post-boot: 448/448 tiles bit-exact under the pass-major binary, and 646.69 ms at 0.21 ms stdev.
+
+Same reason: P3.7c's 716.4 ms and P3.7d's 707.0 ms are **not comparable to any post-boot number**. The
+"unexplained 11 %" is resolved to *boot-to-boot device state* — DVFS / TPU clock calibration at boot is
+the candidate; this HAL exposes no readable clock, so **no mechanism is claimed**.
+
+### The attempt that failed, recorded so it is not repeated
+
+Forcing CPU load (4 × `yes`, 108 % each = **464 % of 800 % CPU busy**) *before* the thermal gate drove
+TPU **25 → 56 °C** and skin2 to 43.5 in under a minute; `gate_wait` correctly refused, the tool call hit
+its 420 s cap and **no artifact was written**. Rule: **a load experiment must be launched after the gate
+opens, inside the same device command as the measurement** — never before it. Cleanup verified afterwards:
+no `yes` and no `hv_proc_b` left running, tree clean.
+
+### `T_N` from this run
+
+0.63944 + 0.2580 (`ffn.down` downsep, **still solo**) = **0.8974 s** ⇒
+`solve_cut.py --Tg 0.1474 --Tn 0.8974 --Tv 10.640` → **k_b\* = 165**, period **24.32 s**, 7.08× vs
+NPU-only — identical to P3.7e's 165 / 24.32 s. The third independent post-boot `T_N` leaves the cut
+where it is; the lock is untouched.
