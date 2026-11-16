@@ -1,6 +1,6 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-15 (night). This file is the orders sheet: read it first, then
+*Updated 2026-11-16 (00:0x, P3.5a landed). This file is the orders sheet: read it first, then
 `docs/00_START_HERE.md`. The `T_N` harness landed with this update; last commit before it: `8280bbc`.*
 
 ## Mission
@@ -193,12 +193,25 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    reproducible **~80 ms dead gap between blocks** = 1.62 s per 20-block chunk (**17 %**),
    12.8 s at 160 blocks/chunk; sample the hash before quoting a period. Both captures start
    1.8 / 3.7 °C over the gate (back-to-back) → mechanism-grade, rates need `cool_rerun.py`.
-   **NEXT TICK: P3.5 pre-work, host + one bounded device run.** (1) add `--pub-every N` to
-   `tools/android/pipe/proc_a.cpp` and a strided `--hash-every` to `proc_b.cpp`, rebuild with
-   `tools/android/pipe/build.sh`; (2) re-run `stream.py --chunks 2 --nblocks 20 --pub-every 160`
-   … the GPU stage then costs 160 × 168 ms = 26.9 s per chunk, so keep it to 2 chunks and
-   launch it under `tools/npu/cool_rerun.py` for a table-grade start; (3) only then P3.5's
-   10 chunks vs the 23.61 s prediction. Nothing else is on the critical path.
+   **P3.5a DONE 2026-11-16 00:0x** → `docs/device/RESULTS_stream_p35a.md`, capture
+   `stream_20261115_233709` (2 × 160 GPU blocks, 20 NPU, table-grade start TPU 25.0 vs 25.3):
+   `--pub-every` / `--hash-every` / `--once-blocks` added (defaults 1 = P3.4 behaviour), PASS
+   2/2 + 2/2, 1440/1440 executes, **GPU block 202.1 ms over n=320 (no drift, −0.34 %)**; on the
+   same import route the one-closure reference is **166.2 ms**; NPU block **392.8 ms** (n=40);
+   publish interval **32.544 s**, publish→consume **0.20/0.45 µs**, back-pressure **0 µs**;
+   `ffn.up` hash 85.5 ms per call ⇒ 170.9 ms total instead of 3.4 s. **The finding: the period
+   at the locked `k_b` = 160 is 32.54 s, 1.38× the 23.61 s prediction**, decomposing into
+   +3.0 s zero-copy import and +5.7 s per-GEMM closure barriers; `solve_cut.py` on the measured
+   pairs gives **k_b* = 157** (`T_G` 0.1662, 26.09 s) / **150** (0.2021, 30.32 s) vs the locked
+   160 — reported, not applied.
+   **NEXT TICK: P3.5 proper — 10 chunks.** `stream.py --chunks 10 --nblocks 20 --pub-every 160
+   --hash-every 20 --timeout 900`. **Do not run it inside one blocking call**: 10 × 32.5 s =
+   325 s of GPU stream plus NPU and pushes, so launch it with `terminal(background=true)` **and**
+   write `docs/device/.measurement_in_flight` (what was launched + where its artifact lands);
+   the next tick verifies/collects it, adds analysis, commits, deletes the marker. Gate first
+   (`cool_rerun.py` if the TPU zone is over `battery + 3`). What it answers: the steady-state
+   overlap (2 chunks structurally understates it — the last chunk's NPU work cannot overlap
+   anything) and the measured 10-chunk period against 32.54 s.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
