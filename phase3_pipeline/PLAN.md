@@ -107,10 +107,26 @@ struct SlotHdr {           // 64 B, one per slot
   mechanism-grade, not table-grade; re-run under `cool_rerun.py` for rates.
 - **P3.5 — 10 chunks.** Steady-state period vs the 23.61 s prediction; per-chunk
   drift table (the same first-20 %/last-20 % method as the sustained soak).
-- **P3.6 — Gate 4.** `dumpsys meminfo` PSS for both PIDs, and `/proc/<pid>/maps`
-  compared to prove one mapped copy of the artifact. Gate 3 (numerical parity) stays
-  parked behind the host FP32 reference (`.venv-ref`) and is *not* a prerequisite for
-  the period measurement — say so explicitly wherever the pipeline numbers are used.
+- ~~**P3.6 — Gate 4.** `dumpsys meminfo` PSS for both PIDs, and `/proc/<pid>/maps`
+  compared to prove one mapped copy of the artifact.~~ — **done 2026-11-16 00:34** →
+  `docs/device/RESULTS_gate4_p36.md`, `tools/pipe/gate4.py`, captures
+  `gate4_20261116_003217` / `…_003411`. **PASS twice**: PSS A+B peak **282.8 MB
+  (0.27 GiB) vs the 2.2 GiB budget (8.2× headroom)**; `proc_a` holds **one `rw-s`
+  MAP_SHARED view** of the 46,399,488 B block (offset 0) with **10/10** windows
+  imported by reference; `proc_b` opens one path, hands the fd to NNAPI, and keeps
+  **0 mappings** of it. Two findings: (a) **`smaps` under-reports a GPU process by
+  2.93×** — `GL mtrack` 164,192 kB is driver-accounted CL memory and never appears in
+  `/proc/<pid>/smaps` (85,137 kB) — so Gate 4 uses the `dumpsys` TOTAL PSS; (b) the
+  device carried a **second 46,399,488 B copy** of the same block
+  (`hv_block_int8.bin`, left over from the T_N harness) plus 128 MiB of stale weight
+  scratch, removed — **137,502,720 B freed**, and `npu_block` must re-push its blobs
+  before the next run. Gate 3 (numerical parity) stays parked behind the host FP32
+  reference (`.venv-ref`) and is *not* a prerequisite for the period measurement —
+  say so explicitly wherever the pipeline numbers are used.
+- **P3.7 — the decode as an execution, and Gate 3's parity.** `--decode 1` is still
+  a stub: wire the measured 10.554 s TPU decode into the NPU stage as real work, and
+  make `proc_b` compare the payload it consumes against an int32 reference for the
+  same block instead of only hashing it.
 
 ## Rules that carry over
 

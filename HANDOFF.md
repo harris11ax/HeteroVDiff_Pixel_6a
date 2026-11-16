@@ -1,8 +1,9 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (00:10, **P3.5 landed — 10 chunks streamed end to end**). This file is the
-orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
-`docs/device/RESULTS_stream_p35.md`; the run is capture `stream_20261116_000415`.*
+*Updated 2026-11-16 (00:40, **P3.6 landed — Gate 4 PASS, one-copy proven, memory 0.27 GiB**). This
+file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
+`docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
+`docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`).*
 
 ## Mission
 
@@ -29,7 +30,8 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
 | **Sustained `T_N`** | **measured** → `docs/device/RESULTS_sustain_npu.md`; 60 rounds × 9 GEMMs = **24.6 s of continuous TPU work, drift +0.35 %** (first-20 % 408.9 / last-20 % 410.3 ms per round, slope +0.03 ms/round) while the TPU zone rose 25.0 → 31.0 °C ⇒ **no derating over a full NPU stage**, so `T_N` carries no throttle term. Tool: `python tools/npu/sustain_npu.py` |
 | **`k_b*`** | **solved = 160** → `configs/rates_preset_a.json` + `phase2_profile/solve_cut.py`; period 23.61 s, 5.394× vs NPU-only, GPU `[0,160)` + NPU `[160,180)` + decode. Survives the attention term **only if the attention runs on Mali** (hybrid decode, `T_V` = 10.640 s); all-TPU decode moves it to 161 |
-| Blocker | every rate the cut needs is now measured on both engines **and checked for sustained drift** — the mid-block VAE attention closed 2026-11-15 21:2x, the 24.6 s sustained soak 21:41. What is still unrun: the Gate-1 end-to-end PSNR/SSIM leg and `calibrate.py` — **environment resolved 2026-11-15 (commit `8663c3f`): use `.venv-ref/Scripts/python.exe`** (torch 2.15.0+cpu, diffusers 0.43.0, transformers 5.23.0, deliberately NOT `.venv-quant` because this cron fires every 15 min in this tree). Measured fp32 GEMM 4096³ = 449.9 GFLOPS, so a 36.0 TFLOP 9-frame reference chunk is ~1.3 min. Gates 3–5 are unbuilt |
+| **Gate 4 (memory + one copy)** | **PASS twice** → `docs/device/RESULTS_gate4_p36.md`, tool `tools/pipe/gate4.py`, captures `gate4_20261116_003217` / `…_003411`. PSS A+B peak **282.8 MB (0.27 GiB) vs the 2.2 GiB budget — 8.2× headroom** (A 246.9 MB median, B 30.9 MB). `proc_a`: **one `rw-s` MAP_SHARED view** of the 46,399,488 B block at offset 0, **10/10** windows imported by reference. `proc_b`: one fd, handed to `createFromFd`, **0 mappings** of its own. **Trap: `smaps` under-reports the GPU stage 2.93×** (`Pss` 85,137 kB vs `dumpsys` TOTAL 249,290 kB — the 164,192 kB `GL mtrack` row is driver-accounted CL memory and is absent from `/proc/<pid>/smaps`) ⇒ quote `dumpsys`, never `smaps`, for Mali |
+| Blocker | every rate the cut needs is now measured on both engines **and checked for sustained drift** — the mid-block VAE attention closed 2026-11-15 21:2x, the 24.6 s sustained soak 21:41. What is still unrun: the Gate-1 end-to-end PSNR/SSIM leg and `calibrate.py` — **environment resolved 2026-11-15 (commit `8663c3f`): use `.venv-ref/Scripts/python.exe`** (torch 2.15.0+cpu, diffusers 0.43.0, transformers 5.23.0, deliberately NOT `.venv-quant` because this cron fires every 15 min in this tree). Measured fp32 GEMM 4096³ = 449.9 GFLOPS, so a 36.0 TFLOP 9-frame reference chunk is ~1.3 min. **Gate 4 is built and PASSing**; what remains of Gates 3–5 is Gate 3's numerical parity, the decode as an execution, and Gate 5 |
 
 ## The two results that changed the project
 
@@ -220,12 +222,22 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    trip; no readable GPU clock) and the one-closure/staging forms were not measured derated —
    that is the cheapest next measurement, `stream.py --chunks 10 --pub-every 160 --once-blocks 0`
    style re-run with the closure form reduced.
-   **NEXT ACTION (P3.6 / Gate 4):** the pipeline now satisfies deliverable 3's "≥ 10 chunks"
-   bar; what Gates 3–5 still lack is **numerical parity across the handoff + the decode as an
-   execution** (`--decode 1` is a no-op stub today). Build P3.6: proc_a fills payload → proc_b
-   checksum vs an int32 reference for the same block, and wire the measured 10.554 s TPU decode
-   into the NPU stage as real work instead of a cited constant. Gate 1's end-to-end PSNR/SSIM leg
-   and `calibrate.py` remain host-only work for a tick when the phone is absent or hot.
+   **P3.6 DONE 2026-11-16 00:34 — Gate 4 PASS twice** → `docs/device/RESULTS_gate4_p36.md`,
+   `tools/pipe/gate4.py`, captures `gate4_20261116_003217` / `…_003411`: PSS A+B peak
+   **282.8 MB (0.27 GiB) vs the 2.2 GiB budget (8.2× headroom)**, `proc_a` holds one
+   `rw-s` MAP_SHARED view with 10/10 imports, `proc_b` one fd and zero mappings. Two
+   findings: **`smaps` under-reports a GPU process 2.93×** (the 164,192 kB `GL mtrack`
+   row is invisible to `/proc/<pid>/smaps`) and the device had been carrying a **second
+   46,399,488 B copy** of the block (`hv_block_int8.bin`, T_N-era) — removed with 128 MiB
+   of other stale weight scratch, **137,502,720 B freed**; re-running `npu_block` needs
+   its blobs re-pushed (no tool pushes them).
+   **NEXT ACTION (P3.7): the decode as an execution + Gate 3's parity.** `--decode 1` is
+   still a no-op stub and `proc_b` only *hashes* the payload it consumes. Wire the measured
+   10.554 s TPU decode into the NPU stage as real work (that also makes the period at
+   `k_b` = 160 a full-cut number instead of GPU-plus-20-blocks), and compare one block's
+   INT8 output against an int32 reference computed on the host, so Gate 3 has a number
+   rather than a hash. Gate 1's end-to-end PSNR/SSIM leg and `calibrate.py` remain
+   host-only work for a tick when the phone is absent or hot.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
@@ -273,6 +285,18 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   `CONV_2D` also reaches **685–1842 GOPS** vs 285 GOPS for FC on the same silicon.
 - `getDuration(DURATION_ON_HARDWARE)` reports ~6 µs for a 0.9 GMAC GEMM → unusable; time the
   synchronous `execute`.
+- **`smaps` does not see a GPU process's memory.** `/proc/<pid>/smaps_rollup` reported
+  `Pss` 85,137 kB for `proc_a` while `dumpsys meminfo <pid>` reported `TOTAL PSS`
+  **249,290 kB** for the same PID — the gap is the **`GL mtrack`** row (164,192 kB), the
+  Mali driver's accounting of the CL buffers the process owns, which never appears in
+  smaps. **Ratio 2.93×; always quote `dumpsys` for the Mali stage.** The control: `proc_b`
+  has no `GL mtrack` and its two sources agree to 0.1 % (measured 2026-11-16,
+  `RESULTS_gate4_p36.md`).
+- **`ls -l /proc/<pid>/fd` counts descriptors, not stored copies.** `proc_b` showed 1 fd on
+  the artifact steady-state and 4 transiently while the 9 graphs compiled; what matters is
+  that every one resolves to the same path and that only one file of that size exists on
+  the device (a leftover T_N-era `hv_block_int8.bin` broke the one-copy claim until it was
+  deleted).
 
 ## Definition of done for the course project
 
