@@ -1,11 +1,12 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
-*Updated 2026-11-16 (01:05, **P3.7a — Gate 3 measured: the TPU stage is 25.8 % bit-exact, and
-the correct region is structural**). This
+*Updated 2026-11-16 (01:25, **P3.7b — the Gate 3 failure is localized: it is the M row tile, and an
+exact 100 % recipe now exists**). This
 file is the orders sheet: read it first, then `docs/00_START_HERE.md`. The pipeline detail is
 `docs/device/RESULTS_stream_p35.md` (run `stream_20261116_000415`); Gate 4 is
 `docs/device/RESULTS_gate4_p36.md` (runs `gate4_20261116_003217` / `…_003411`); Gate 3 is
-`docs/device/RESULTS_gate3_parity.md` (captures `gate3_parity_20261116_005432` / `…_010101`).*
+`docs/device/RESULTS_gate3_parity.md` (captures `gate3_parity_20261116_005432` / `…_010101`) and its
+bisect is `docs/device/RESULTS_gate3_bisect.md` (captures `gate3_bisect_20261116_012157` … `_012349`).*
 
 ## Mission
 
@@ -28,7 +29,7 @@ tables + IEEE report; the student owns the hardware rig, slides and paper.
 | **NPU block graph (`T_N`)** | **measured as a sum** → `docs/device/RESULTS_npu_tn.md`; 9 GEMMs gate-compliant (0.4178 s) + `ffn.down` chunked 7×K=1280 (0.2580 s) = **0.6758 s/block**, 210 GOPS |
 | **VAE decode (`T_V`)** | **both branches measured** → `docs/device/RESULTS_vae_tv.md`; TPU (36 causal convs as `kT` shifted `CONV_2D` taps) **10.554 s/chunk**, 969.7 GOPS; Mali (`conv8_taps`, implicit GEMM, one dispatch per class) **12.256 s/chunk**, 417.5 GOPS, 7/13 classes exact vs the int32 reference. **TPU 1.16× faster** on the convs — the decode ordering is the opposite of the block's. Mid-block attention (32.4 GMAC) **now measured on both engines**: TPU **0.601 s**, Mali **0.0855 s** (one dispatch per GEMM) ⇒ **Mali 7.0× faster**, the opposite ordering again. `T_V` = **11.155 s all-TPU · 10.640 s hybrid · 12.342 s all-Mali** — no longer a lower bound |
 | Gate 1 (artifact) | **INT8 base + verifier done** → `docs/device/RESULTS_gate1.md`; 1,391,984,640 B INT8 (exact), 300/300 GEMMs cosine ≥ 0.999922, coverage 1317/1317 tensors. **Outstanding: end-to-end PSNR/SSIM leg — no longer environment-blocked: `.venv-ref` (torch 2.15.0+cpu, diffusers 0.43.0) is installed, commit `8663c3f`** |
-| **Gate 3 (parity)** | **measured, FAILS** → `docs/device/RESULTS_gate3_parity.md`, tool `tools/pipe/gate3_parity.py`, `proc_b --dump-parity/--act`. The TPU `FULLY_CONNECTED` returns the exact integer product for only **25.8 %** of each output tile: **the last 384-column block is bit-exact for every row and row 0 is bit-exact for every column**, everything else is not any FC result. Reference proved by those same bit-exact regions. Ruled out by measurement: async write (re-dump 150 ms later identical), buffer alignment (4096-aligned → bit-identical), transpose, row-stride, row/col permutation, n-shift, stale other-GEMM data, weight-byte echo |
+| **Gate 3 (parity)** | **measured, FAILS as configured — but LOCALIZED and a passing recipe exists** → `docs/device/RESULTS_gate3_parity.md` + `docs/device/RESULTS_gate3_bisect.md`, tools `tools/pipe/gate3_parity.py`, `tools/pipe/gate3_bisect.py`, `proc_b --dump-parity/--probe-dir/--act`. The break is the **M (row) direction**: `N = 384` graphs are **100.00 % bit-exact (Δ = 0, 0 elements off by ≥2)** at `M = 1/8/128/160/192/200`, `N = 768` at `M = 128`, `N = 1536` at `M = 1`, on both `attn1.to_q` and `ffn.up`; the same 384-column graph at `M = 384` **will not compile** (`OP_FAILED`, ~58 ms). Wide graphs at `M = 256…384` return 25.8–50.7 %. So the fix Gate 3 proposed ("one graph per 384-column block") is the exact graph this compiler refuses, and the exact recipe is `N ∈ {128,384,768}` × `M ≤ 200` = **112 executes/block** instead of 9 — **cost unmeasured** |
 | Gates 4–5 | Gate 4 PASS (memory + one copy) |
 | **Co-run `T_G` / `T_N`** | **measured** → `docs/device/RESULTS_corun_tg.md`; both engines executing at once, 99.8 % of GPU-time overlapped NPU executes. GPU base block **0.1474 s** (no slowdown — it measured 8 % *faster* than solo), NPU 9-GEMM round **0.3904 s** (±4 % per GEMM). `T_N/T_G = 4.40×` |
 | **Sustained `T_N`** | **measured** → `docs/device/RESULTS_sustain_npu.md`; 60 rounds × 9 GEMMs = **24.6 s of continuous TPU work, drift +0.35 %** (first-20 % 408.9 / last-20 % 410.3 ms per round, slope +0.03 ms/round) while the TPU zone rose 25.0 → 31.0 °C ⇒ **no derating over a full NPU stage**, so `T_N` carries no throttle term. Tool: `python tools/npu/sustain_npu.py` |
@@ -253,11 +254,25 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    outputs, which is why `--act basis` exists (every output then equals a stored
    weight byte). No lock touched, no rate edited: `T_N` was always declared
    latency-only.
-   **NEXT ACTION (P3.7b): bisect the HAL with a single-output-tile graph** —
-   one `FULLY_CONNECTED` at `N = 384` (one block), `M = TILE`, basis activations.
-   100 % exact ⇒ the break is the multi-output-block path, fix = one graph per
-   384-column block (4 compilations, which also re-prices `T_N` honestly); still
-   25 % ⇒ the break is the `M = 384` row path, next probe `M = 1`.
+   **P3.7b DONE 2026-11-16 01:25 — the bisect localizes it, and an exact recipe exists** →
+   `docs/device/RESULTS_gate3_bisect.md`, tool `tools/pipe/gate3_bisect.py`,
+   `proc_b --probe-dir DIR --probe-g G [--probe-plan "M,N,col0;…"]` (standalone probe mode, no ring,
+   32 graphs over 5 captures). Measured, bit-exact = Δ 0 LSB vs exact integer accumulation:
+   `N=384` **100.00 %** at `M=1/8/128/160/192/200`; `N=768` **100.00 %** at `M=128`; `N=1536`
+   **100.00 %** at `M=1` only; `N=1536` at `M=256/320/384` → **50.67 / 50.60 / 25.83 %**. Same
+   boundary on `ffn.up` (N=8960) ⇒ shape-driven, not weight-driven. **The 384-column graph at
+   `M=384` does not compile at all** (`OP_FAILED` in 57–73 ms, three separate runs), so the
+   "one graph per 384-column block" fix Gate 3 proposed is the exact graph this compiler refuses.
+   The compiler hole is non-monotonic (`208×384` fails while `200×384` and `384×1536` compile) —
+   recorded as a measured map, **no mechanism claimed**. Exact recipe = `N ∈ {128,384,768}` ×
+   `M ≤ 200`: 4 column graphs × 2 row tiles for the eight 1536-wide GEMMs, 24 graphs
+   (23×384 + tail 128 at `col0=8832`, also 100 %) for `ffn.up` ⇒ **112 executes/block vs 9 today**.
+   Indicative (2 executes, ungated, *not* table-grade) warm exec 1.54–1.69 ms per `M=192×N=384`
+   graph, 1.18–1.24 ms per `M=192×N=128`, 22.95 ms for one `M=192×N=8960` — extrapolated ≈0.18 s
+   per exact block, *below* the 377.8 ms the current 9-graph stage costs. **NEXT ACTION (P3.7c):
+   measure `T_N` on the exact recipe properly** — repeated executes per graph, thermal gate via
+   `tools/npu/cool_rerun.py`, then the same co-run treatment, before any cut argument uses it.
+   Also unproven: the 100 % holds on blocks other than `block_00`, and on `ffn.down` (K=8960).
    Still unrun after that: `--decode 1` remains a **no-op stub** (the measured
    10.554 s TPU decode is cited, not executed) and Gate 1's PSNR/SSIM leg +
    `calibrate.py` are the host-only work for a tick when the phone is absent/hot.
@@ -331,6 +346,15 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   `--act basis` (`A[r][r]=127` ⇒ every output equals a stored weight byte) is the probe
   that makes the check information-rich; the dense residual saturates 45 % of outputs at
   `SA = 1/127` and hides the failure in rounding noise.
+- **`FULLY_CONNECTED` has a shape hole, and the exact shapes are small** (measured 2026-11-16,
+  `RESULTS_gate3_bisect.md`, 32 probe graphs on two GEMMs). Bit-exact (Δ 0 LSB):
+  `N = 384` × `M ≤ 200`, `N = 768` × `M = 128`, `N = 1536` × `M = 1`. Refused at compile
+  (`OP_FAILED` in 57–73 ms, not a timeout): `N = 384` × `M ≥ 208`, `N = 768` × `M ≥ 192`,
+  `N = 1536` × `M ≤ 192` — **non-monotonic**: `200×384` compiles, `208×384` does not,
+  `384×1536` does, `192×768` does not. Wide graphs at `M = 256…384` compile and run but are only
+  25.8–50.7 % exact, and the surviving region is **not** a fixed rule: at `M=384` the last
+  384-column block is 100 % while at `M=256/320` all four blocks are ~50.7 %. So there is no
+  "correct subset" to exploit — either use the small exact shapes or accept a wrong result.
 
 ## Definition of done for the course project
 

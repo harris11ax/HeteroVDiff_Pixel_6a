@@ -416,6 +416,9 @@ struct Args {
     int hash_every = 1;            // hash ffn.up's 13.7 MB output every N blocks (0 = never)
                                   // 1 = every block (the P3.3/P3.4 behaviour, ~80 ms dead
                                   // gap per block measured there)
+    std::string probe_dir;         // DIR: Gate 3 bisect — single/multi output-block graphs
+    int probe_g = 0;               // GEMM index the bisect probes (0 = attn1.to_q)
+    std::string probe_plan;        // "M,N,col0;M,N,col0;..." overrides the default sweep
 };
 
 static Args parse(int argc, char** argv) {
@@ -438,10 +441,14 @@ static Args parse(int argc, char** argv) {
         else if (k == "--dump-parity") a.dump_parity = val("--dump-parity");
         else if (k == "--act") a.act = val("--act");
         else if (k == "--hash-every") a.hash_every = atoi(val("--hash-every").c_str());
+        else if (k == "--probe-dir") a.probe_dir = val("--probe-dir");
+        else if (k == "--probe-g") a.probe_g = atoi(val("--probe-g").c_str());
+        else if (k == "--probe-plan") a.probe_plan = val("--probe-plan");
         else if (k == "--help" || k == "-h") {
             P("usage: proc_b --block B [--scales S] [--ring R] [--blocks N] [--nblocks N] [--M 1530]"
               " [--down skip|stage] [--source fork|none] [--decode 0|1] [--hash-every N]"
-              " [--dump-parity DIR] [--act payload|basis|window]");
+              " [--dump-parity DIR] [--act payload|basis|window]"
+              " [--probe-dir DIR --probe-g 0..8   (Gate 3 bisect, no ring needed)]");
             std::exit(0);
         } else { P("FATAL|unknown_arg|%s", k.c_str()); std::exit(2); }
     }
@@ -452,6 +459,129 @@ static Args parse(int argc, char** argv) {
     if (a.blocks < 1) a.blocks = 1;
     if (a.nblocks < 1) a.nblocks = 1;
     return a;
+}
+
+// ------------------------------------------------------------ Gate 3 bisect
+// P3.7b. The Gate 3 dump showed a FULLY_CONNECTED tile returning the exact
+// integer product for only the LAST 384-column output block (every row) plus
+// ROW 0 (every column). Two structural explanations fit, and they have
+// different fixes:
+//
+//   (a) the multi-output-block path is broken  -> last-block-only is a
+//       copy-back/loop bug, fix = one graph per 384-column block;
+//   (b) the M = 384 row path is broken         -> only row 0 is right, fix is
+//       in the row handling.
+//
+// This mode builds exactly those graphs — N = 384 (one block), N = 768 (two),
+// N = full, at M = 1/8/128/384 — over the SAME one-memory-view weight window
+// (offset + col0*K into the row-major [N_out, K] matrix, so still zero copies),
+// runs them, and dumps the int8 activation and output for each. The host
+// recomputes the product exactly. Nothing here is a latency claim.
+struct ProbeSpec { int M, N, col0; const char* tag; };
+
+static int run_probe(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem, const Args& a) {
+    const int g = a.probe_g;
+    if (g < 0 || g >= 9) { P("FATAL|probe_g|%d|range=0..8", g); return 2; }
+    const int NOUT = GEMMS[g].N;
+    const int K = GEMMS[g].K;
+    ::mkdir(a.probe_dir.c_str(), 0777);
+    P("PROBE|plan|g=%d|gemm=%s|N_out=%d|K=%d|woff_base=%" PRId64 "|dir=%s",
+      g, GEMMS[g].name, NOUT, K, GEMMS[g].off, a.probe_dir.c_str());
+
+    std::vector<ProbeSpec> plan;
+    if (!a.probe_plan.empty()) {
+        // "M,N,col0;M,N,col0;..." — explicit sweep, no rebuild needed. Tags are
+        // generated (and de-duplicated) so the host can key its verification by
+        // tag without parsing positions.
+        static char tagbuf[128][64];            // stable addresses: ProbeSpec holds const char*
+        int ntags = 0;
+        size_t pos = 0;
+        const std::string& s = a.probe_plan;
+        while (pos <= s.size()) {
+            size_t sep = s.find(';', pos);
+            const std::string item = s.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
+            if (!item.empty()) {
+                int M = 0, N = 0, c0 = 0;
+                if (sscanf(item.c_str(), "%d,%d,%d", &M, &N, &c0) >= 2) {
+                    if (ntags >= 128) { P("WARN|probe_plan_too_long"); break; }
+                    snprintf(tagbuf[ntags], sizeof tagbuf[ntags], "m%d_n%d_c%d", M, N, c0);
+                    bool dup = false;
+                    for (int q = 0; q < ntags; ++q)
+                        if (strcmp(tagbuf[q], tagbuf[ntags]) == 0) dup = true;
+                    if (dup) {
+                        char tmp[64];
+                        snprintf(tmp, sizeof tmp, "%s_d", tagbuf[ntags]);
+                        snprintf(tagbuf[ntags], sizeof tagbuf[ntags], "%s", tmp);
+                    }
+                    plan.push_back({M, N, c0, tagbuf[ntags]});
+                    ++ntags;
+                } else {
+                    P("WARN|bad_probe_item|%s", item.c_str());
+                }
+            }
+            if (sep == std::string::npos) break;
+            pos = sep + 1;
+        }
+        P("PROBE|plan_explicit|items=%zu", plan.size());
+    } else {
+    plan.push_back({384, 384, 0,            "m384_n384_c0"});
+    plan.push_back({384, 384, NOUT - 384,   "m384_n384_clast"});
+    if (NOUT >= 768) {
+        plan.push_back({384, 768, 0,          "m384_n768_c0"});
+        plan.push_back({384, 768, NOUT - 768, "m384_n768_clast"});
+    }
+    plan.push_back({384, NOUT, 0,           "m384_nfull"});
+    plan.push_back({1,   384, 0,            "m1_n384_c0"});
+    plan.push_back({1,   NOUT, 0,           "m1_nfull"});
+    plan.push_back({8,   384, 0,            "m8_n384_c0"});
+    plan.push_back({128, 384, 0,            "m128_n384_c0"});
+    plan.push_back({384, 384, 0,            "m384_n384_c0_rep"});
+    }
+
+    int fails = 0;
+    for (size_t i = 0; i < plan.size(); ++i) {
+        const ProbeSpec& s = plan[i];
+        const int64_t woff = GEMMS[g].off + (int64_t)s.col0 * (int64_t)K;
+        Slot slot;
+        int last_rc = 0;
+        char nm[128];
+        snprintf(nm, sizeof nm, "%s/%s", GEMMS[g].name, s.tag);
+        WSrc w{wmem, woff, nullptr};
+        const int crc = compile_fc(tpu, s.M, s.N, K, w, nm, (int)i, &slot, &last_rc);
+        if (crc) { P("PROBE|FAIL|i=%zu|tag=%s|stage=compile|rc=%d(%s)", i, s.tag, last_rc, rcs(last_rc));
+                   ++fails; continue; }
+
+        // basis activation over this graph's K: A[r][r % K] = 127, so the exact
+        // output is out[r][n] = W_global[col0 + n][r % K] — one stored weight
+        // byte per element, no saturation, and the host can recompute it.
+        std::vector<int8_t> in((size_t)s.M * (size_t)K, 0);
+        for (int r = 0; r < s.M; ++r) in[(size_t)r * (size_t)K + (r % K)] = 127;
+        std::vector<int8_t> out((size_t)s.M * (size_t)s.N, 0);
+
+        double ms1 = 0, ms2 = 0;
+        int erc = exec_fc(slot, s.M, in.data(), out.data(), &ms1);
+        if (!erc) erc = exec_fc(slot, s.M, in.data(), out.data(), &ms2);
+        if (erc) { P("PROBE|FAIL|i=%zu|tag=%s|stage=exec|rc=%d(%s)", i, s.tag, erc, rcs(erc));
+                   ANeuralNetworksCompilation_free(slot.comp); ANeuralNetworksModel_free(slot.model);
+                   ++fails; continue; }
+
+        char fi[512], fo[512];
+        snprintf(fi, sizeof fi, "%s/p%02zu_%s_in.bin", a.probe_dir.c_str(), i, s.tag);
+        snprintf(fo, sizeof fo, "%s/p%02zu_%s_out.bin", a.probe_dir.c_str(), i, s.tag);
+        const size_t inb = in.size(), outb = out.size();
+        const bool oki = write_blob(fi, in.data(), inb);
+        const bool oko = write_blob(fo, out.data(), outb);
+        P("PROBE|i=%zu|tag=%s|g=%d|N=%d|K=%d|M=%d|col0=%d|woff=%" PRId64
+          "|in_bytes=%zu|out_bytes=%zu|fnv_in=%016" PRIx64 "|fnv_out=%016" PRIx64
+          "|compile_ms=%.1f|exec_ms=%.3f|ms2=%.3f|ok=%d",
+          i, s.tag, g, s.N, K, s.M, s.col0, woff, inb, outb,
+          fnv(FNV0, in.data(), inb), fnv(FNV0, out.data(), outb),
+          slot.compile_ms, ms1, ms2, (oki && oko) ? 1 : 0);
+        ANeuralNetworksCompilation_free(slot.comp);
+        ANeuralNetworksModel_free(slot.model);
+    }
+    P("SUMMARY|probe|graphs=%zu|fails=%d", plan.size(), fails);
+    return fails ? 1 : 0;
 }
 
 // ------------------------------------------------------------- fork producer
@@ -525,6 +655,14 @@ int main(int argc, char** argv) {
       a.block.c_str(), (long long)W_BYTES, a.M, tiles, TILE, a.blocks, a.nblocks,
       a.down.c_str(), a.source.c_str());
     P("NOTE|scales=%s|per_tensor_graphs(per_column_rejected)|latency_only", scl_note.c_str());
+
+    // ---- Gate 3 bisect: standalone probe run, no ring, no producer, no decode.
+    if (!a.probe_dir.empty()) {
+        const int prc = run_probe(tpu, wmem, a);
+        ANeuralNetworksMemory_free(wmem);
+        ::close(fd);
+        return prc;
+    }
 
     // ---- 9 held compilations, one graph per GEMM. A whole-block graph reboots
     //      this phone inside Compilation_finish — never retry that here.
