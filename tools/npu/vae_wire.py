@@ -61,6 +61,9 @@ R_BI = "/data/local/tmp/vae_bias.f32"
 R_WIRE = "/data/local/tmp/vae_wire.txt"
 R_SA2 = "/data/local/tmp/vae_sa2.f32"
 R_NM = "/data/local/tmp/vae_norms.f32"
+# P3.13: the evidence files — the final activation codes and the latent the walk
+# actually consumed, each with its own scale. Pulled to artifacts/vae/dump_<ts>/.
+DUMP_FILES = ("vae_dump.bin", "vae_dump.txt", "vae_latent.bin", "vae_latent.txt")
 
 ZONE_KEYS = ("TPU", "skin_therm1", "skin_therm2", "battery", "VIRTUAL-SKIN")
 
@@ -160,7 +163,15 @@ def build_wire() -> tuple[list[dict], list[tuple], str, dict]:
         lines.append(f"LAYER {li} {frames} {fin} {a['cout']} {a['cin']} {a['h']} {a['w']} "
                      f"{len(a['taps'])} {wiring} {a['sc_off']} {a['artifact_index']} {name}")
         for t, tp in zip(a["taps"], lp["taps"]):
-            d = {"f": 0, "f-1": 1, "f-2": 2}[tp["input_frame"]]
+            # P3.13 MEASURED DEFECT: the plan's `input_frame` label is MIRRORED relative to
+            # PyTorch's causal conv3d. `WanCausalConv3d` pads 2 zeros at the FRONT of the
+            # time axis, so weight slice 0 is applied to x[f-2] — but `vae_export` labels
+            # slice 0 "f". Emulating both pairings against the checkpoint module on layer 0
+            # (tools/npu/conv_parity.py, 2026-11-16): as-labelled cosine 0.056, mirrored
+            # 1.00005. Every 3-tap conv in this program was therefore reading the wrong
+            # frames, which is what made the walk execute without decoding.
+            d_label = {"f": 0, "f-1": 1, "f-2": 2}[tp["input_frame"]]
+            d = (len(a["taps"]) - 1) - d_label
             assert tp["kernel"][1] == kh and tp["kernel"][2] == kw, f"{name} kernel drift"
             lines.append(f"TAP {t['tap']} {d} {t['offset']} {t['bytes']} {kh} {kw}")
         layers.append(dict(idx=li, name=name, frames=frames, fin=fin, cout=a["cout"],
@@ -359,6 +370,11 @@ def main() -> int:
     ap.add_argument("--pc", type=int, default=-1, choices=[-1, 0, 1])
     ap.add_argument("--cooldown", action="store_true",
                     help="refuse to run unless max(TPU, skin, VIRTUAL-SKIN) <= battery + 3")
+    ap.add_argument("--dump", action="store_true",
+                    help="write the final activation codes + the consumed latent on the device "
+                         "and pull them (P3.13: what makes a device PSNR possible)")
+    ap.add_argument("--dump-layer", type=int, default=-1,
+                    help="dump one conv's exact int8 input AND output and stop (parity probe)")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--out", default="vae_wire")
     args = ap.parse_args()
@@ -422,7 +438,8 @@ def main() -> int:
     adb(serial, f"shell chmod 755 {REMOTE_BIN}")
 
     adb(serial, "logcat -c")
-    cmd = f"shell {REMOTE_BIN} convwire {args.convs} {args.pc}"
+    cmd = (f"shell {REMOTE_BIN} convwire {args.convs} {args.pc} {1 if args.dump else 0} "
+           f"{args.dump_layer}")
     print(f"running: {cmd}")
     rc, out = adb(serial, cmd, timeout=args.timeout)
     print(out)
@@ -431,6 +448,26 @@ def main() -> int:
 
     rec = parse(out)
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # P3.13: pull the evidence. A dump that did not land is recorded as such — the
+    # capture keeps its value either way, and the analyser refuses to invent one.
+    dump = None
+    if args.dump:
+        ddir = VAE_DIR / f"dump_{ts}"
+        ddir.mkdir(parents=True, exist_ok=True)
+        files = DUMP_FILES
+        if args.dump_layer >= 0:
+            tag = f"l{args.dump_layer:02d}"
+            files = tuple(f"vae_dump_{side}_{tag}.{ext}" for side in ("in", "out")
+                          for ext in ("bin", "txt"))
+        got = {}
+        for fn in files:
+            rrc, rtxt = adb(serial, f"pull /data/local/tmp/{fn} {ddir / fn}", timeout=300)
+            got[fn] = {"rc": rrc, "bytes": (ddir / fn).stat().st_size if (ddir / fn).exists() else 0}
+        dump = {"dir": str(ddir), "files": got,
+                "complete": all(v["bytes"] > 0 for v in got.values())}
+        print(f"dump -> {ddir} ({'complete' if dump['complete'] else 'INCOMPLETE'})")
+
     doc = dict(serial=serial, timestamp=ts, cmd=cmd, rc=rc,
                bin_sha=sha16(BIN), plan_sha=hashlib.sha256(text.encode()).hexdigest()[:16],
                weights_sha=sha16(VAE_DIR / "weights_int8.bin"),
@@ -438,7 +475,7 @@ def main() -> int:
                norms_sha=sha16(VAE_DIR / "norms_f32.bin"),
                convs=args.convs, pc=args.pc, layers_planned=layers, meta=meta,
                thermal=dict(before=zones0, after=zones1, gate=gate, verdict=verdict),
-               parsed=rec, logcat_tail=log[-4000:])
+               parsed=rec, logcat_tail=log[-4000:], dump=dump)
     js = DEVICE_DIR / f"{args.out}_{ts}.json"
     js.write_text(json.dumps(doc, indent=2), encoding="utf-8")
 

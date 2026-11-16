@@ -1,5 +1,23 @@
 # HANDOFF — HeteroVDiff on Pixel 6a
 
+*Updated 2026-11-16 (07:36, **P3.13 — the device decode has a quality number and it FAILS:
+11.60 dB / cosine 0.219 against the fp32 reference from the identical quantised latent. Two
+defects came out of it. (1) FOUND AND FIXED — the program's tap→frame labels were
+**mirrored**: `WanCausalConv3d` pads 2 zeros at the FRONT, so weight slice 0 is applied to
+`x[f-2]`, but `vae_export` labels slice 0 `"f"`; emulated against the checkpoint on
+`decoder.conv_in` the labelled pairing scores cosine **0.0558** and the mirrored one
+**1.00005**, so all 36 convs had been reading the wrong frames. (2) The HAL is EXONERATED on
+`CONV_2D`: with the fix, layer 0's device codes are **98.59 % bit-identical** (100 % within
+±1, cosine 1.000312) to the exact emulation of the program — unlike `FULLY_CONNECTED` in
+Gate 3 — so the remaining error is the **glue** (NORMSILU / ADD / SAVE-LOAD / shuffle
+gathers), not the conv. Also measured: each tap's graph carries the same INT32 bias (bias
+counted kT times) and each tap is rounded before the sum, costing ~1 % cosine per layer;
+and `post_quant_conv` (16→16, non-identity) is **missing from the program entirely**.
+Mechanism-grade thermal (24.0 vs 23.9 gate). → `docs/device/RESULTS_vae_psnr.md`, tools
+`tools/npu/vae_psnr.py` (new), `tools/npu/conv_parity.py` (new), `npu_block convwire … 1 [L]`
+(dump + per-layer probe), captures `vae_wire_dumpr_20261116_073415`,
+`vae_dump_layer0_fix_20261116_073615`, `vae_psnr_20261116_073602`,
+`conv_parity_20261116_073621`.*
 *Updated 2026-11-16 (07:02, **P3.12 — the decode is WIRED and it executes: 36/36 convs, 592/592
 `CONV_2D` executes, and the saturation that P3.10 could only point at (worst layer 38.57 %) is
 **0.0721 %** with the norm in place — 19/36 layers clamp nothing.** `npu_block convwire` walks a
@@ -556,12 +574,14 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
  still executes without decoding, no quality claim, and no device rate changed.
  **NEXT ACTION (device, one bounded unit): implement the P3.11 plan in `convseq`** — **DONE 07:02, see
  P3.12 above**: implemented as `npu_block convwire` over a 101-op program, not inside `convseq` (so the
- P3.8–P3.10 captures keep their meaning). 592/592, saturation 0.0721 % worst. **New NEXT ACTION:
- `OP DUMP` — write the final 9×3×272×480 int8 codes so the host can PSNR the device's decode against
- `.venv-ref` from the SAME quantised latent (the synthetic latent is in the program as wiring 3, and
- `SA_in[0]` dequantises it). Until that number exists, "the decode decodes" is unproven and Gate 1's
- 38.73 dB is a simulation, not a device result.** After that: `proc_b --decode 1` → `convwire`, then
- Gate 5.**
+ P3.8–P3.10 captures keep their meaning). 592/592, saturation 0.0721 % worst. **Then `OP DUMP` — DONE
+ 07:36, see P3.13 above**: the walk emits its final codes + the latent it consumed; the device decode
+ scores **11.60 dB / cosine 0.219** against fp32 from the same latent, the tap→frame labels were
+ **mirrored (FIXED)** and the `CONV_2D` HAL is **faithful at 98.59 % bit-exact**. **New NEXT ACTION, in
+ order: (a) host-side program simulator over `vae_wire.txt` + per-layer device probes
+ (`--dump-layer L`) to localize which GLUE op is wrong — the convs and the HAL are exonerated;
+ (b) `post_quant_conv` is missing from the program (report, don't fold); (c) per-tap bias should be
+ given to tap 0 only (recovers ~1 %/layer); then `proc_b --decode 1` → `convwire`, then Gate 5.**
 10. Phase 4 tables, report.
 
 ## Decisions already locked (do not reopen without saying why)
@@ -632,6 +652,23 @@ NNAPI / Edge TPU (paid for 2026-11-15, evidence in `RESULTS_npu_tn.md`):
   that every one resolves to the same path and that only one file of that size exists on
   the device (a leftover T_N-era `hv_block_int8.bin` broke the one-copy claim until it was
   deleted).
+- **A causal conv3d's weight slice 0 is applied to `x[f-2]`, not `x[f]`** (measured
+  2026-11-16). `WanCausalConv3d` pads two zeros at the FRONT of the time axis, so the tap
+  decomposition of a `kT=3` conv is `tap t ↔ frame f-(kT-1-t)`. `vae_export` labelled slice 0
+  `"f"`, and every wire program built from that label read the wrong frames for 36 layers —
+  it executes, and its saturation looks *better*, while the decode is uncorrelated with the
+  reference (cosine 0.056 vs the checkpoint; 1.00005 when mirrored). Any tap→frame table
+  must be checked against the module, not derived from the shape.
+- **`CONV_2D` on this TPU is numerically faithful — `FULLY_CONNECTED` is not** (measured
+  2026-11-16, `RESULTS_vae_psnr.md`): one layer's device codes are **98.59 % bit-identical**
+  to an exact emulation of the program (100 % within ±1, cosine 1.000312), whereas the FC
+  hole (Gate 3) returned 25.8 % for wide shapes. So a decode error is a *program* bug or the
+  glue, and the conv must be exonerated before anything else is blamed.
+- **`vae.decode` applies `post_quant_conv` (16→16, non-identity) before `decoder.conv_in`**,
+  and that op is not in the artifact — a device-vs-host comparison that forgets it is
+  comparing two different inputs (it produced a 0.46-cosine false alarm on the first attempt).
+- **`--convs N` + dump is post-NORM, not post-conv**: the walk breaks at the *next* conv, after
+  the intervening ops have run. A per-layer parity probe must dump inside the conv.
 Host-side model traps (paid for 2026-11-16, `phase1_quant/calibrate.py`):
 
 - **The DCM checkpoint is not a stock diffusers state dict.** Every attention/ffn projection is

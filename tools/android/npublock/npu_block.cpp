@@ -1149,6 +1149,14 @@ static int run_convseq(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
 static const char* VAE_WIRE_PATH = "/data/local/tmp/vae_wire.txt";
 static const char* VAE_SA2_PATH  = "/data/local/tmp/vae_sa2.f32";    // 2 x 36: SA_in ++ SA_out
 static const char* VAE_NM_PATH   = "/data/local/tmp/vae_norms.f32";  // 29 gammas, concatenated
+// P3.13: the walk had no way to show its OUTPUT. These two files are the decode's
+// evidence — the final activation codes and the latent codes the first conv
+// actually consumed — so the host can dequantise both and PSNR the device's
+// decode against the fp32 reference from the SAME quantised latent.
+static const char* VAE_DUMP_PATH = "/data/local/tmp/vae_dump.bin";   // final act, [f][h][w][c] int8
+static const char* VAE_DUMP_META = "/data/local/tmp/vae_dump.txt";
+static const char* VAE_LAT_PATH  = "/data/local/tmp/vae_latent.bin"; // the latent codes, same layout
+static const char* VAE_LAT_META  = "/data/local/tmp/vae_latent.txt";
 
 struct WireOp { int kind, a, b; long long goff; double p1, p2; };
 enum { W_CONV = 0, W_SAVE, W_LOAD, W_NORMSILU, W_NORM, W_SILU, W_ADD, W_SKIP };
@@ -1230,7 +1238,7 @@ struct ActBuf {
 };
 
 static int run_convwire(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
-                        int max_convs, int pcmode) {
+                        int max_convs, int pcmode, int dump, int dumplayer) {
     const char* why = "";
     std::vector<SeqLayer> planrec;
     std::vector<WireOp> prog;
@@ -1272,6 +1280,11 @@ static int run_convwire(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
     }
 
     ActBuf act, slot[2];
+    // The latent the walk actually consumed (wiring 3 builds it once). Captured so
+    // the host never has to re-derive the LCG — it dequantises these exact codes.
+    std::vector<int8_t> lat;
+    int lat_f = 0, lat_c = 0, lat_h = 0, lat_w = 0;
+    double lat_sa = 0.0;
     int64_t convs = 0, execs = 0, macs = 0, compile_ns = 0, tapfails = 0, pcfb = 0;
     int64_t prep_ns = 0, epi_ns = 0, silk_ns = 0, add_ns = 0, slot_ns = 0;
     int64_t clamps = 0, el_norm = 0, el_add = 0;
@@ -1406,6 +1419,10 @@ static int run_convwire(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
             for (size_t i = 0; i < inb.size(); ++i) {
                 x = x * 1664525u + 1013904223u;
                 inb[i] = (int8_t)((x >> 24) & 0xFF);
+            }
+            if (dump && lat.empty()) {
+                lat = inb; lat_f = L.fin; lat_c = L.cin; lat_h = L.h; lat_w = L.w;
+                lat_sa = (double)sa_in;
             }
         } else {
             if (!act.live) { P("FATAL|wire_conv_no_act|layer=%d", (int)op.a); P("DONE"); return 5; }
@@ -1579,6 +1596,74 @@ static int run_convwire(ANeuralNetworksDevice* tpu, ANeuralNetworksMemory* wmem,
 
         act.shape(L.frames, L.cout, L.h, L.w, sa_out);
         memcpy(act.d.data(), outb.data(), outb.size());
+
+        // P3.13 parity probe: dump THIS conv's exact int8 input and output and stop.
+        // A single layer with both ends is a self-contained test — no wiring, no
+        // norm, nothing assumed: the host can emulate the taps from the same codes.
+        if (dump && dumplayer == (int)op.a) {
+            char pbo[256], pbi[256];
+            snprintf(pbo, sizeof pbo, "/data/local/tmp/vae_dump_out_l%02d.bin", (int)op.a);
+            snprintf(pbi, sizeof pbi, "/data/local/tmp/vae_dump_in_l%02d.bin", (int)op.a);
+            FILE* f = fopen(pbo, "wb");
+            if (!f) { P("FATAL|dump_layer_open|%s", pbo); P("DONE"); return 5; }
+            const size_t n1 = fwrite(outb.data(), 1, outb.size(), f); fclose(f);
+            f = fopen(pbi, "wb");
+            if (!f) { P("FATAL|dump_layer_open|%s", pbi); P("DONE"); return 5; }
+            const size_t n2 = fwrite(inb.data(), 1, inb.size(), f); fclose(f);
+            char pm[256];
+            snprintf(pm, sizeof pm, "/data/local/tmp/vae_dump_out_l%02d.txt", (int)op.a);
+            f = fopen(pm, "w");
+            if (f) { fprintf(f, "layout=fhwc\nf=%d\nc=%d\nh=%d\nw=%d\nsa=%.9g\nbytes=%zu\n",
+                             L.frames, L.cout, L.h, L.w, (double)sa_out, outb.size()); fclose(f); }
+            snprintf(pm, sizeof pm, "/data/local/tmp/vae_dump_in_l%02d.txt", (int)op.a);
+            f = fopen(pm, "w");
+            if (f) { fprintf(f, "layout=fhwc\nf=%d\nc=%d\nh=%d\nw=%d\nsa=%.9g\nbytes=%zu\n",
+                             L.fin, L.cin, L.h, L.w, (double)sa_in, inb.size()); fclose(f); }
+            P("DUMPLAYER|layer=%d|name=%s|out=%s|out_bytes=%zu|in=%s|in_bytes=%zu|"
+              "sa_in=%.9g|sa_out=%.9g|frames=%d|fin=%d|taps=%zu|clamp=%lld/%lld",
+              (int)op.a, L.name.c_str(), pbo, n1, pbi, n2, (double)sa_in, (double)sa_out,
+              L.frames, L.fin, L.taps.size(), (long long)layclamp,
+              (long long)((int64_t)L.frames * (int64_t)plane_out));
+            P("DONE");
+            return 0;
+        }
+    }
+
+    // ---- P3.13: dump the final activation and the consumed latent. Without this
+    // the walk can only prove it EXECUTED; the codes are what let the host PSNR the
+    // device's decode against the fp32 reference from the identical quantised
+    // latent. Layout [f][h][w][c] int8 (the harness's internal order), dequantised
+    // with each tensor's own declared scale, which is written beside it.
+    if (dump) {
+        if (!act.live) { P("FATAL|wire_dump_no_act"); P("DONE"); return 5; }
+        FILE* d = fopen(VAE_DUMP_PATH, "wb");
+        if (!d) { P("FATAL|wire_dump_open|%s", VAE_DUMP_PATH); P("DONE"); return 5; }
+        const size_t nw = fwrite(act.d.data(), 1, act.d.size(), d);
+        fclose(d);
+        if (nw != act.d.size()) { P("FATAL|wire_dump_short|%zu/%zu", nw, act.d.size()); P("DONE"); return 5; }
+        FILE* m = fopen(VAE_DUMP_META, "w");
+        if (m) {
+            fprintf(m, "layout=fhwc\nf=%d\nc=%d\nh=%d\nw=%d\nsa=%.9g\nbytes=%zu\nmacs=%lld\n",
+                    act.f, act.c, act.h, act.w, (double)act.sa, act.d.size(), (long long)macs);
+            fclose(m);
+        }
+        P("DUMP|path=%s|bytes=%zu|f=%d|c=%d|h=%d|w=%d|sa=%.9g",
+          VAE_DUMP_PATH, act.d.size(), act.f, act.c, act.h, act.w, (double)act.sa);
+        if (!lat.empty()) {
+            FILE* lf = fopen(VAE_LAT_PATH, "wb");
+            if (lf) {
+                const size_t lw = fwrite(lat.data(), 1, lat.size(), lf);
+                fclose(lf);
+                FILE* lm = fopen(VAE_LAT_META, "w");
+                if (lm) {
+                    fprintf(lm, "layout=fhwc\nf=%d\nc=%d\nh=%d\nw=%d\nsa=%.9g\nbytes=%zu\n",
+                            lat_f, lat_c, lat_h, lat_w, lat_sa, lat.size());
+                    fclose(lm);
+                }
+                P("DUMP|path=%s|bytes=%zu|f=%d|c=%d|h=%d|w=%d|sa=%.9g",
+                  VAE_LAT_PATH, lat.size(), lat_f, lat_c, lat_h, lat_w, lat_sa);
+            }
+        }
     }
 
     const double total_s = (now_ns() - run0) / 1e9;
@@ -1711,13 +1796,17 @@ int main(int argc, char** argv) {
         return run_convseq(tpu, wmem, max_layers, pcmode);
     }
 
-    // mode=convwire <max_convs> <pc>: the WIRED decode — the same 592 CONV_2D
+    // mode=convwire <max_convs> <pc> <dump>: the WIRED decode — the same 592 CONV_2D
     // dispatches, with the P3.11 norm/SiLU/add/shuffle program between them.
+    // dump=1 writes the final activation codes + the consumed latent (P3.13).
     if (strcmp(mode, "convwire") == 0) {
         const int max_convs = (argc > 2) ? atoi(argv[2]) : 0;    // 0 = all 36
         const int pcmode    = (argc > 3) ? atoi(argv[3]) : -1;   // -1 = probe first
-        P("CONVWIRE|max_convs=%d|pc=%d|wbytes=%lld", max_convs, pcmode, (long long)wbytes);
-        return run_convwire(tpu, wmem, max_convs, pcmode);
+        const int dmp       = (argc > 4) ? atoi(argv[4]) : 0;    // 1 = write the dump
+        const int dmpl      = (argc > 5) ? atoi(argv[5]) : -1;   // >=0 = dump that conv only
+        P("CONVWIRE|max_convs=%d|pc=%d|dump=%d|dump_layer=%d|wbytes=%lld", max_convs, pcmode, dmp,
+          dmpl, (long long)wbytes);
+        return run_convwire(tpu, wmem, max_convs, pcmode, dmp, dmpl);
     }
 
     // mode=conv <tiles> <iters> <N> <H> <W> <Cin> <Cout> <k> — one CONV_2D op,
