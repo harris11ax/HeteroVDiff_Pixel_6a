@@ -55,9 +55,18 @@ struct SlotHdr {           // 64 B, one per slot
   Split launch (`--role producer|consumer` from two adb sessions) also passes.
   Producer blocks on 198/200 chunks even free-running — back-pressure is the
   normal path, which is why two slots are required rather than nice to have.
-- **P3.2 — GPU stage over real weights.** `tools/android/pipe/proc_a.cpp`: mmap the
+- ~~**P3.2 — GPU stage over real weights.** `tools/android/pipe/proc_a.cpp`: mmap the
   artifact, run the existing tiled INT8 GEMM block (`gemm8.cl`) for k blocks, write
-  the residual payload into the slot. Timing per block emitted as `TS|gpu|..`.
+  the residual payload into the slot. Timing per block emitted as `TS|gpu|..`.~~
+  — **done 2026-11-15 22:25** → `docs/device/RESULTS_proc_a_p32.md`. Real artifact,
+  10/10 weight windows imported zero-copy, 80/80 GEMMs, 8/8 chunks drained by a
+  second PID. **Import costs 32 %/block**: 214.5 ms (662 GOPS) zero-copy vs 162.2 ms
+  (875 GOPS) with device-local staging, which reproduces the 161.8 ms block rate.
+  Attention +4 %, FFN up/down +15/16 % — the penalty tracks the weight working set
+  that misses cache. `k_b*` would be 157 (staging) or 148 (import) vs the locked 160:
+  **a fork for P3.4 to present, not to apply.**
+  Open: payload conversion is host-side (44–57 ms/block) — an fp16 epilogue in
+  `gemm8_tiled` removes it before any period number is quoted.
 - **P3.3 — NPU stage over real weights.** `tools/android/pipe/proc_b.cpp`: wait on
   `seq`, run `(180 - k)` blocks as the held-compilation FC graphs (the `corun` code
   path), then the decode stub, publish `done`.

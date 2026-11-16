@@ -157,11 +157,19 @@ with the device network off — use `python tools/npu/cool_rerun.py`, never a ba
    median **63.7 µs**; ring file exactly **9,408,512 B = 2 slots**; split `--role producer|consumer`
    launch from two adb sessions passes 30/30. Producer blocked on 198/200 chunks even free-running, so
    the 2-slot ring's `done` gate is the normal path, not an edge case.
-   **NEXT TICK: P3.2 — `tools/android/pipe/proc_a.cpp`**, the GPU stage over the real artifact: mmap the
-   INT8 weights (route B), run the existing tiled `gemm8.cl` block kernel for `k` blocks, write the
-   residual payload into slot `(i-1) % 2` via `handoff.h`, emit `TS|gpu|…` per block. Target check
-   against the measured **0.1474 s** co-run base block — reuse `tools/android/gemm/kernels/`, do not
-   rewrite the kernel.
+   **P3.2 DONE 2026-11-15 22:25** → `docs/device/RESULTS_proc_a_p32.md`: `tools/android/pipe/proc_a.cpp`
+   + `tools/pipe/proc_a.py` run the real artifact — mmap `block_00.bin`, 10/10 weight windows imported
+   zero-copy, 80/80 GEMMs, 8/8 chunks published and drained by a second PID. **The finding: zero-copy
+   costs the GPU 32 %/block** — import **214.5 ms** (662 GOPS) vs device-local staging **162.2 ms**
+   (875 GOPS, independently reproducing the 161.8 ms block rate). Attention only +4 % but both FFN
+   weights (13.8 MiB each) **+15/16 %**, i.e. the penalty tracks the weight working set that misses
+   cache. Cut consequence reported, not applied: `k_b*` **157** (staging, period 25.55 s) / **148**
+   (import, 31.75 s) vs the locked 160 / 23.61 s. Closure barrier measured **1.7 µs**; payload
+   conversion is host-side and costs **44–57 ms/block** (removable with an fp16 epilogue kernel).
+   **NEXT TICK: P3.3 — `tools/android/pipe/proc_b.cpp`**, the NPU stage: wait on `seq`, run
+   `(180 - k)` blocks as the held-compilation FC graphs (the `corun` code path), then the decode stub,
+   publish `done`. **`ffn.down` has no NPU graph** at K=8960 — use the measured 7×K=1280 + 6×ADD
+   (`downsep`) or leave the down projection on Mali and say so.
    Host-only work that can run in parallel: ~~fold `T_V` = 10.640 (hybrid) into `configs/rates_preset_a.json`~~
    — **done 2026-11-15 21:3x** (k_b* re-solved: 160, period 23.61 s).
 10. Phase 4 tables, report.
